@@ -1,0 +1,39 @@
+project:
+  name: cv-human-video-matting
+
+device:
+  mode: auto
+
+input:
+  source: video
+  resize_short: 720
+
+matting:
+  model: rvm_mobilenetv3
+  checkpoint: weights/rvm_mobilenetv3.pth
+  downsample_ratio: auto
+
+postprocess:
+  enable_temporal_smooth: true
+  temporal_alpha: 0.75
+  edge_feather: 3
+
+depth:
+  enabled: true
+  model: MiDaS_small
+  interval: 5
+  label_mode: relative
+  thresholds:
+    near: 0.66
+    mid: 0.33
+
+render:
+  mode: side_by_side
+  background_color: "#00FF00"
+
+paths:
+  input_dir: data/input
+  background_dir: data/backgrounds
+  output_dir: data/output
+  weights_dir: weights
+

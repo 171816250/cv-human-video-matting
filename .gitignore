@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments
+.venv/
+venv/
+env/
+.conda/
+
+# IDE
+.idea/
+.vscode/
+
+# Project artifacts
+weights/*
+!weights/README.md
+data/input/*
+!data/input/.gitkeep
+data/backgrounds/*
+!data/backgrounds/.gitkeep
+data/output/*
+!data/output/.gitkeep
+runs/
+logs/
+
+# Media and model files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.pth
+*.pt
+*.onnx
+*.safetensors
+
+# OS
+Thumbs.db
+.DS_Store
+

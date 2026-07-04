@@ -1,0 +1,11 @@
+[project]
+name = "cv-human-video-matting"
+version = "0.1.0"
+description = "Iterative human video matting project for natural-scene background removal."
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

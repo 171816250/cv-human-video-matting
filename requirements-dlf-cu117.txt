@@ -1,0 +1,20 @@
+# GPU environment used on this machine:
+#   conda env: DLF
+#   Python: 3.9.13
+#   torch: 1.13.0+cu117
+#   torchvision: 0.14.0+cu117
+#
+# Keep NumPy below 2.0 for torch 1.13 compatibility.
+numpy==1.23.5
+opencv-python==4.8.1.78
+PyYAML>=6.0
+pytest>=8.0
+tqdm>=4.66
+Pillow>=10.0
+gradio==4.37.2
+gradio-client==1.0.2
+fastapi==0.111.1
+starlette==0.37.2
+pydantic==2.8.2
+pydantic-core==2.20.1
+imageio-ffmpeg==0.6.0
