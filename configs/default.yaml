@@ -14,12 +14,14 @@ matting:
   downsample_ratio: auto
 
 postprocess:
-  enable_temporal_smooth: true
+  enable_temporal_smooth: false
   temporal_alpha: 0.75
-  edge_feather: 3
+  edge_feather: 0
+  mask_open: 0
+  mask_close: 0
 
 depth:
-  enabled: true
+  enabled: false
   model: MiDaS_small
   interval: 5
   label_mode: relative
@@ -28,7 +30,7 @@ depth:
     mid: 0.33
 
 render:
-  mode: side_by_side
+  mode: green
   background_color: "#00FF00"
 
 paths:
@@ -36,4 +38,3 @@ paths:
   background_dir: data/backgrounds
   output_dir: data/output
   weights_dir: weights
-

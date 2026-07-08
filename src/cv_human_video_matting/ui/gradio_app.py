@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import cv2
 import gradio as gr
@@ -20,17 +21,32 @@ from cv_human_video_matting.pipeline import (
     render_matting_frame,
 )
 from cv_human_video_matting.postprocess import TemporalAlphaSmoother
+from cv_human_video_matting.utils.config import config_value
+from cv_human_video_matting.utils.device import resolve_device
 from cv_human_video_matting.utils.paths import ensure_dir
 
 
 OUTPUT_DIR = Path("data/output")
-BATCH_MODE_CHOICES = ["green", "blur", "transparent", "image", "alpha", "foreground", "side_by_side"]
+BATCH_MODE_CHOICES = [
+    "green",
+    "blur",
+    "transparent",
+    "image",
+    "alpha",
+    "foreground",
+    "side_by_side",
+]
 LIVE_MODE_CHOICES = ["green", "blur", "image", "alpha", "foreground", "side_by_side"]
 MODEL_CHOICES = [
     ("RVM MobileNetV3 (Fast)", "rvm_mobilenetv3"),
     ("RVM ResNet50 (Balanced)", "rvm_resnet50"),
     ("BiRefNet (High Quality)", "birefnet"),
 ]
+MODEL_VALUES = [choice[1] for choice in MODEL_CHOICES]
+
+# Active project config, set by build_demo so batch/live callbacks can resolve
+# config-only settings (e.g. matting.checkpoint) the same way the CLI does.
+_ACTIVE_CONFIG: dict = {}
 
 
 @dataclass
@@ -45,14 +61,41 @@ class LiveRunnerCache:
 _LIVE_CACHE = LiveRunnerCache()
 
 
+@dataclass(frozen=True)
+class BatchDemoResult:
+    video_path: str | None
+    artifact_path: str | None
+    status: str
+
+
 def _timestamped_output_path(mode: str) -> Path:
     ensure_dir(OUTPUT_DIR)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return OUTPUT_DIR / f"gradio_{timestamp}_{mode}.mp4"
 
 
+def _zip_png_sequence(sequence_dir: str | Path) -> Path:
+    source = Path(sequence_dir)
+    if not source.is_dir():
+        raise gr.Error(f"Transparent output directory was not created: {source}")
+
+    frame_paths = sorted(source.glob("frame_*.png"))
+    if not frame_paths:
+        raise gr.Error(f"Transparent output directory has no PNG frames: {source}")
+
+    archive_path = source.with_suffix(".zip")
+    with ZipFile(archive_path, "w", compression=ZIP_DEFLATED) as archive:
+        for frame_path in frame_paths:
+            archive.write(frame_path, arcname=frame_path.name)
+    return archive_path
+
+
 def _format_mode(mode: str) -> str:
     return mode.replace("_", " ").title()
+
+
+def _choice_default(value: object, choices: list[str], fallback: str) -> str:
+    return str(value) if value in choices else fallback
 
 
 def _resize_rgb_for_live(frame_rgb: np.ndarray, max_width: int) -> np.ndarray:
@@ -96,7 +139,7 @@ def prepare_input_preview(video_path: str | None) -> str | None:
     return str(ensure_browser_playable_video(video_path))
 
 
-def run_demo(
+def _run_batch_demo(
     video_path: str | None,
     background_path: str | None,
     model: str,
@@ -110,14 +153,16 @@ def run_demo(
     temporal_blend: float = 0.75,
     enable_depth: bool = False,
     depth_interval: int = 5,
-) -> tuple[str, str]:
+) -> BatchDemoResult:
     if not video_path:
         raise gr.Error("Please upload an input video first.")
     if mode == "image" and not background_path:
         raise gr.Error("Image background mode requires a background image.")
 
+    actual_device = resolve_device(device)
     output_path = _timestamped_output_path(mode)
-    runner = create_matting_runner(model=model, device=device)
+    checkpoint = config_value(_ACTIVE_CONFIG, "matting.checkpoint")
+    runner = create_matting_runner(model=model, checkpoint=checkpoint, device=actual_device)
     stats = process_video(
         input_path=video_path,
         output_path=output_path,
@@ -132,21 +177,102 @@ def run_demo(
         temporal_blend=temporal_blend,
         enable_depth=enable_depth,
         depth_interval=depth_interval,
-        device=device,
+        device=actual_device,
     )
-    playable_output = ensure_browser_playable_video(stats.output_path)
+    if mode == "transparent":
+        archive_path = _zip_png_sequence(stats.output_path)
+        output_label = f"PNG frames: {stats.output_path}\nDownload: {archive_path}"
+        video_path_out = None
+        artifact_path = str(archive_path)
+    else:
+        playable_output = ensure_browser_playable_video(stats.output_path)
+        output_label = f"Output: {playable_output}"
+        video_path_out = str(playable_output)
+        artifact_path = None
 
-    depth_status = f"\nDepth Labeling: {'Enabled (interval={})'.format(depth_interval) if enable_depth else 'Disabled'}"
+    depth_label = f"Enabled (interval={depth_interval})" if enable_depth else "Disabled"
+    depth_status = f"\nDepth Labeling: {depth_label}"
     status = (
-        f"Output: {playable_output}\n"
+        f"{output_label}\n"
         f"Model: {model}\n"
+        f"Device: {actual_device}\n"
         f"Mode: {_format_mode(mode)}\n"
         f"Frames: {stats.frames}\n"
         f"Elapsed: {stats.elapsed_seconds:.3f}s\n"
         f"FPS: {stats.fps:.2f}"
         + depth_status
     )
-    return str(playable_output), status
+    return BatchDemoResult(video_path=video_path_out, artifact_path=artifact_path, status=status)
+
+
+def run_demo(
+    video_path: str | None,
+    background_path: str | None,
+    model: str,
+    mode: str,
+    max_frames: int,
+    device: str,
+    edge_feather: int = 0,
+    mask_open: int = 0,
+    mask_close: int = 0,
+    temporal_smooth: bool = False,
+    temporal_blend: float = 0.75,
+    enable_depth: bool = False,
+    depth_interval: int = 5,
+) -> tuple[str | None, str]:
+    result = _run_batch_demo(
+        video_path=video_path,
+        background_path=background_path,
+        model=model,
+        mode=mode,
+        max_frames=max_frames,
+        device=device,
+        edge_feather=edge_feather,
+        mask_open=mask_open,
+        mask_close=mask_close,
+        temporal_smooth=temporal_smooth,
+        temporal_blend=temporal_blend,
+        enable_depth=enable_depth,
+        depth_interval=depth_interval,
+    )
+    return result.video_path or result.artifact_path, result.status
+
+
+def run_demo_for_ui(
+    video_path: str | None,
+    background_path: str | None,
+    model: str,
+    mode: str,
+    max_frames: int,
+    device: str,
+    edge_feather: int = 0,
+    mask_open: int = 0,
+    mask_close: int = 0,
+    temporal_smooth: bool = False,
+    temporal_blend: float = 0.75,
+    enable_depth: bool = False,
+    depth_interval: int = 5,
+):
+    result = _run_batch_demo(
+        video_path=video_path,
+        background_path=background_path,
+        model=model,
+        mode=mode,
+        max_frames=max_frames,
+        device=device,
+        edge_feather=edge_feather,
+        mask_open=mask_open,
+        mask_close=mask_close,
+        temporal_smooth=temporal_smooth,
+        temporal_blend=temporal_blend,
+        enable_depth=enable_depth,
+        depth_interval=depth_interval,
+    )
+    return (
+        gr.update(value=result.video_path, visible=result.video_path is not None),
+        gr.update(value=result.artifact_path, visible=result.artifact_path is not None),
+        result.status,
+    )
 
 
 def render_live_frame(
@@ -167,12 +293,13 @@ def render_live_frame(
     if mode == "image" and not background_path:
         return None, "Image mode needs a background image."
 
+    actual_device = resolve_device(device)
     frame_rgb = _resize_rgb_for_live(frame_rgb, int(max_live_width))
     frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
     background_bgr = load_background_image(background_path)
     cache = _live_cache_for(
         model=model,
-        device=device,
+        device=actual_device,
         temporal_smooth=temporal_smooth,
         temporal_blend=temporal_blend,
     )
@@ -200,7 +327,7 @@ def render_live_frame(
         f"Frame: {cache.frames}\n"
         f"Last frame: {elapsed * 1000:.1f} ms\n"
         f"Session FPS: {session_fps:.2f}\n"
-        f"Device: {device}"
+        f"Device: {actual_device}"
     )
     return rendered_rgb, status
 
@@ -527,7 +654,47 @@ def _build_css() -> str:
     """
 
 
-def build_demo() -> gr.Blocks:
+def build_demo(config: dict | None = None) -> gr.Blocks:
+    config = config or {}
+    # Publish config so batch/live callbacks resolve config-only settings
+    # (e.g. matting.checkpoint) the same way the CLI does.
+    global _ACTIVE_CONFIG
+    _ACTIVE_CONFIG = config
+    batch_model_default = _choice_default(
+        config_value(config, "matting.model", "rvm_resnet50"),
+        MODEL_VALUES,
+        "rvm_resnet50",
+    )
+    live_model_default = _choice_default(
+        config_value(config, "matting.model", "rvm_mobilenetv3"),
+        ["dummy", "rvm_mobilenetv3"],
+        "rvm_mobilenetv3",
+    )
+    device_default = _choice_default(
+        config_value(config, "device.mode", "auto"),
+        ["auto", "cpu", "cuda"],
+        "auto",
+    )
+    batch_mode_default = _choice_default(
+        config_value(config, "render.mode", "green"),
+        BATCH_MODE_CHOICES,
+        "green",
+    )
+    live_mode_default = _choice_default(
+        config_value(config, "render.mode", "green"),
+        LIVE_MODE_CHOICES,
+        "green",
+    )
+    edge_feather_default = int(config_value(config, "postprocess.edge_feather", 0))
+    mask_open_default = int(config_value(config, "postprocess.mask_open", 0))
+    mask_close_default = int(config_value(config, "postprocess.mask_close", 0))
+    temporal_smooth_default = bool(
+        config_value(config, "postprocess.enable_temporal_smooth", False)
+    )
+    temporal_blend_default = float(config_value(config, "postprocess.temporal_alpha", 0.75))
+    enable_depth_default = bool(config_value(config, "depth.enabled", False))
+    depth_interval_default = int(config_value(config, "depth.interval", 5))
+
     with gr.Blocks(
         title="Human Video Matting",
         theme=gr.themes.Base(primary_hue="blue", neutral_hue="slate"),
@@ -588,6 +755,10 @@ def build_demo() -> gr.Blocks:
                                         include_audio=False,
                                         height=320,
                                     )
+                                    output_file = gr.File(
+                                        label="Output Files",
+                                        visible=False,
+                                    )
                                 with gr.Group(elem_classes=["panel"]):
                                     gr.HTML(_panel_header("Run Log", "frames and timing"))
                                     status_output = gr.Textbox(
@@ -603,19 +774,19 @@ def build_demo() -> gr.Blocks:
                                 with gr.Column(elem_classes=["control-stack"]):
                                     model_input = gr.Dropdown(
                                         label="Model",
-                                        choices=[choice[1] for choice in MODEL_CHOICES],
-                                        value="rvm_resnet50",
+                                        choices=MODEL_VALUES,
+                                        value=batch_model_default,
                                         info="BiRefNet offers best edge quality but slower",
                                     )
                                     device_input = gr.Dropdown(
                                         label="Device",
-                                        choices=["cpu", "cuda"],
-                                        value="cuda",
+                                        choices=["auto", "cpu", "cuda"],
+                                        value=device_default,
                                     )
                                     mode_input = gr.Dropdown(
                                         label="Mode",
                                         choices=BATCH_MODE_CHOICES,
-                                        value="green",
+                                        value=batch_mode_default,
                                         info="blur=background bokeh, transparent=BGRA PNG",
                                     )
                                     max_frames_input = gr.Slider(
@@ -629,14 +800,14 @@ def build_demo() -> gr.Blocks:
                                     with gr.Accordion("⭐ Distance Labeling (NEW)", open=True):
                                         enable_depth_input = gr.Checkbox(
                                             label="Enable Distance Labeling",
-                                            value=False,
+                                            value=enable_depth_default,
                                             info="Show Near/Mid/Far distance labels on person",
                                         )
                                         depth_interval_input = gr.Slider(
                                             label="Depth Interval",
                                             minimum=1,
                                             maximum=30,
-                                            value=5,
+                                            value=depth_interval_default,
                                             step=1,
                                             info="Estimate depth every N frames",
                                         )
@@ -645,33 +816,33 @@ def build_demo() -> gr.Blocks:
                                             label="Edge Feather",
                                             minimum=0,
                                             maximum=9,
-                                            value=0,
+                                            value=edge_feather_default,
                                             step=1,
                                         )
                                         mask_open_input = gr.Slider(
                                             label="Mask Open",
                                             minimum=0,
                                             maximum=9,
-                                            value=0,
+                                            value=mask_open_default,
                                             step=1,
                                         )
                                         mask_close_input = gr.Slider(
                                             label="Mask Close",
                                             minimum=0,
                                             maximum=9,
-                                            value=0,
+                                            value=mask_close_default,
                                             step=1,
                                         )
                                     with gr.Accordion("Temporal Controls", open=True):
                                         temporal_smooth_input = gr.Checkbox(
                                             label="Temporal Smooth",
-                                            value=False,
+                                            value=temporal_smooth_default,
                                         )
                                         temporal_blend_input = gr.Slider(
                                             label="Temporal Blend",
                                             minimum=0.0,
                                             maximum=0.95,
-                                            value=0.75,
+                                            value=temporal_blend_default,
                                             step=0.05,
                                         )
                                     run_button = gr.Button(
@@ -716,17 +887,17 @@ def build_demo() -> gr.Blocks:
                                     live_model = gr.Dropdown(
                                         label="Model",
                                         choices=["dummy", "rvm_mobilenetv3"],
-                                        value="rvm_mobilenetv3",
+                                        value=live_model_default,
                                     )
                                     live_device = gr.Dropdown(
                                         label="Device",
-                                        choices=["cpu", "cuda"],
-                                        value="cuda",
+                                        choices=["auto", "cpu", "cuda"],
+                                        value=device_default,
                                     )
                                     live_mode = gr.Dropdown(
                                         label="Mode",
                                         choices=LIVE_MODE_CHOICES,
-                                        value="green",
+                                        value=live_mode_default,
                                     )
                                     live_width = gr.Slider(
                                         label="Max Live Width",
@@ -745,33 +916,33 @@ def build_demo() -> gr.Blocks:
                                             label="Edge Feather",
                                             minimum=0,
                                             maximum=9,
-                                            value=0,
+                                            value=edge_feather_default,
                                             step=1,
                                         )
                                         live_mask_open = gr.Slider(
                                             label="Mask Open",
                                             minimum=0,
                                             maximum=9,
-                                            value=0,
+                                            value=mask_open_default,
                                             step=1,
                                         )
                                         live_mask_close = gr.Slider(
                                             label="Mask Close",
                                             minimum=0,
                                             maximum=9,
-                                            value=0,
+                                            value=mask_close_default,
                                             step=1,
                                         )
                                     with gr.Accordion("Temporal Controls", open=True):
                                         live_temporal_smooth = gr.Checkbox(
                                             label="Temporal Smooth",
-                                            value=False,
+                                            value=temporal_smooth_default,
                                         )
                                         live_temporal_blend = gr.Slider(
                                             label="Temporal Blend",
                                             minimum=0.0,
                                             maximum=0.95,
-                                            value=0.75,
+                                            value=temporal_blend_default,
                                             step=0.05,
                                         )
                                     reset_live_button = gr.Button(
@@ -786,7 +957,7 @@ def build_demo() -> gr.Blocks:
             )
 
             run_button.click(
-                fn=run_demo,
+                fn=run_demo_for_ui,
                 inputs=[
                     video_input,
                     background_input,
@@ -802,7 +973,7 @@ def build_demo() -> gr.Blocks:
                     enable_depth_input,
                     depth_interval_input,
                 ],
-                outputs=[output_video, status_output],
+                outputs=[output_video, output_file, status_output],
             )
 
             live_camera.stream(
@@ -835,6 +1006,11 @@ def build_demo() -> gr.Blocks:
     return demo
 
 
-def launch_demo(server_name: str = "127.0.0.1", server_port: int = 7860, share: bool = False) -> None:
-    demo = build_demo()
+def launch_demo(
+    server_name: str = "127.0.0.1",
+    server_port: int = 7860,
+    share: bool = False,
+    config: dict | None = None,
+) -> None:
+    demo = build_demo(config=config)
     demo.launch(server_name=server_name, server_port=server_port, share=share)

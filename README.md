@@ -63,7 +63,7 @@ python app.py inspect --input data/input/demo.mp4
 - `green`: 绿幕背景（传统抠图效果）
 - `foreground`: 黑色背景（突出人物）
 - `blur`: **背景虚化**（类似人像模式景深效果）
-- `transparent`: **透明PNG**（BGRA四通道，可用于后期合成）
+- `transparent`: **透明PNG帧序列**（BGRA四通道，输出为 `*_frames/frame_000000.png`，可用于后期合成）
 - `image`: 自定义背景图片替换
 - `side_by_side`: 左右对比（原图 vs 抠图结果）
 
@@ -140,9 +140,40 @@ python app.py matte \
 Python 3.9-3.11 推荐。
 NVIDIA GPU + CUDA 12.1+ 推荐（实时高质量档）。
 无GPU时自动降级到轻量档。
+CLI 和 Gradio 的设备选项支持 `auto`、`cpu`、`cuda`；`auto` 会优先使用 CUDA，不可用时自动回退到 CPU。
 
 ```bash
 pip install -r requirements.txt
+```
+
+Pre-download the default lightweight model cache:
+
+```bash
+python scripts/download_models.py
+```
+
+Optional downloads:
+
+```bash
+python scripts/download_models.py --models all
+python scripts/download_models.py --models birefnet
+```
+
+## Configuration
+
+`configs/default.yaml` provides safe defaults for CLI and Gradio:
+
+- `matting.model`: default model when `--model` is omitted
+- `device.mode`: `auto`, `cpu`, or `cuda`
+- `render.mode`: default render mode
+- `postprocess.*`: alpha refinement and temporal smoothing defaults
+- `depth.enabled`: default distance labeling switch
+
+CLI arguments override config values:
+
+```bash
+python app.py --config configs/default.yaml matte --input data/input/smoke_demo.mp4 --output data/output/from_config.mp4
+python app.py --config configs/default.yaml ui
 ```
 
 The base environment currently has CPU-only PyTorch. For GPU inference on this machine, use the existing `DLF` conda environment:
@@ -301,11 +332,11 @@ Then open:
 http://127.0.0.1:7860
 ```
 
-The UI provides video upload, optional image background upload, model selection, output mode selection, CPU/CUDA device selection, max-frame control, optional refinement controls, output preview, and run status.
+The UI provides video upload, optional image background upload, model selection, output mode selection, auto/CPU/CUDA device selection, max-frame control, optional refinement controls, output preview, and run status.
 
 The UI now has two workspaces:
 
-- `Batch Render`: uploads a video and writes a playable MP4 result.
+- `Batch Render`: uploads a video and writes a playable MP4 result, or a zipped PNG sequence for transparent output.
 - `Live Camera`: opens the browser webcam and runs frame-by-frame matting for live preview.
 
 For live camera mode, use the `DLF` environment and choose `cuda` for the best frame rate. If the preview is slow, lower `Max Live Width` to `320` or `480`, turn off temporal smoothing, or use `dummy` to verify the webcam path first. Browser camera permission is required.

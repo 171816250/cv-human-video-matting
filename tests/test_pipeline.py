@@ -5,7 +5,11 @@ import numpy as np
 
 from cv_human_video_matting.io.video import probe_video
 from cv_human_video_matting.matting.dummy import DummyMattingRunner
-from cv_human_video_matting.pipeline import process_video, render_matting_frame
+from cv_human_video_matting.pipeline import (
+    _transparent_output_dir,
+    process_video,
+    render_matting_frame,
+)
 
 
 def _write_test_video(path: Path, size: tuple[int, int] = (64, 48), frames: int = 6) -> None:
@@ -87,6 +91,32 @@ def test_process_video_writes_image_background_output(tmp_path):
     assert output_info.height == 48
 
 
+def test_process_video_writes_transparent_png_sequence(tmp_path):
+    input_path = tmp_path / "input.mp4"
+    requested_output_path = tmp_path / "transparent.mp4"
+    _write_test_video(input_path)
+
+    stats = process_video(
+        input_path=input_path,
+        output_path=requested_output_path,
+        runner=DummyMattingRunner(),
+        mode="transparent",
+        max_frames=3,
+    )
+
+    output_dir = tmp_path / "transparent_frames"
+    frame_paths = sorted(output_dir.glob("frame_*.png"))
+    assert stats.output_path == output_dir
+    assert stats.frames == 3
+    assert not requested_output_path.exists()
+    assert len(frame_paths) == 3
+
+    frame = cv2.imread(str(frame_paths[0]), cv2.IMREAD_UNCHANGED)
+    assert frame is not None
+    assert frame.shape == (48, 64, 4)
+    assert frame.dtype == np.uint8
+
+
 def test_process_video_accepts_postprocess_options(tmp_path):
     input_path = tmp_path / "input.mp4"
     output_path = tmp_path / "postprocess.mp4"
@@ -124,3 +154,39 @@ def test_render_matting_frame_returns_single_rendered_frame():
     assert alpha.shape == frame.shape[:2]
     # Alpha can be float32 or uint8 depending on postprocessing
     assert alpha.dtype in (np.float32, np.uint8)
+
+
+def test_transparent_output_dir_appends_frames_suffix_with_extension(tmp_path):
+    out = _transparent_output_dir(tmp_path / "result.mp4")
+
+    assert out == tmp_path / "result_frames"
+
+
+def test_transparent_output_dir_appends_frames_suffix_without_extension(tmp_path):
+    # A suffix-less --output must not become the frame sink directly, or an
+    # existing directory's frame_*.png files could be deleted.
+    target = tmp_path / "existing_dir"
+    out = _transparent_output_dir(target)
+
+    assert out == tmp_path / "existing_dir_frames"
+    assert out != target
+
+
+def test_process_video_depth_interval_zero_does_not_crash(tmp_path):
+    input_path = tmp_path / "input.mp4"
+    output_path = tmp_path / "green.mp4"
+    _write_test_video(input_path)
+
+    # depth_interval=0 must be clamped instead of raising ZeroDivisionError.
+    # DummyMattingRunner has no depth model, so enable_depth stays False; the
+    # clamp itself is what we assert does not raise.
+    stats = process_video(
+        input_path=input_path,
+        output_path=output_path,
+        runner=DummyMattingRunner(),
+        mode="green",
+        max_frames=3,
+        depth_interval=0,
+    )
+
+    assert stats.frames == 3

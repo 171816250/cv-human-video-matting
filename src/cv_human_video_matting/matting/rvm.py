@@ -10,6 +10,10 @@ import torch
 
 from cv_human_video_matting.matting.base import MattingResult
 
+# Pinned torch.hub reference for Robust Video Matting. Shared so pre-download
+# tooling (scripts/download_models.py) caches exactly the ref loaded at runtime.
+RVM_HUB_REF = "PeterL1n/RobustVideoMatting:master"
+
 
 class RVMRunner:
     def __init__(
@@ -22,7 +26,7 @@ class RVMRunner:
         self.device = torch.device(device)
         self.downsample_ratio = downsample_ratio
         self.model = torch.hub.load(
-            "PeterL1n/RobustVideoMatting:master",
+            RVM_HUB_REF,
             model_name,
             pretrained=True,
             trust_repo=True,

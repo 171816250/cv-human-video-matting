@@ -11,6 +11,9 @@ PyYAML>=6.0
 pytest>=8.0
 tqdm>=4.66
 Pillow>=10.0
+transformers>=4.40
+timm>=0.9
+safetensors>=0.4
 gradio==4.37.2
 gradio-client==1.0.2
 fastapi==0.111.1

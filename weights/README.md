@@ -4,6 +4,16 @@ Place model weights in this directory.
 
 Do not commit model files to Git. Add download links and checksum notes here when a model is introduced.
 
+Use the helper script to populate the local model caches:
+
+```bash
+python scripts/download_models.py
+python scripts/download_models.py --models all
+python scripts/download_models.py --models birefnet
+```
+
+`all` prepares the RVM MobileNetV3, RVM ResNet50, and MiDaS caches. BiRefNet is opt-in because it is larger.
+
 ## RVM
 
 The MVP runner uses:

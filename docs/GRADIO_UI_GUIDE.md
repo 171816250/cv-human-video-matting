@@ -58,7 +58,7 @@ Running on local URL:  http://127.0.0.1:7860
 #### 渲染模式
 - **green** - 绿幕背景（传统抠图）
 - **blur** ⭐ - 背景虚化（人像景深效果）
-- **transparent** ⭐ - 透明PNG（BGRA四通道）
+- **transparent** ⭐ - 透明PNG帧序列（BGRA四通道，UI提供zip下载）
 - **image** - 自定义背景图片替换
 - **alpha** - Alpha遮罩可视化
 - **foreground** - 黑色背景
@@ -192,10 +192,10 @@ Depth Labeling: Enabled (interval=5)
 - 适用于视觉效果，不适用于精确测量
 
 ### 3. 透明模式输出
-- `transparent` 模式输出BGRA四通道
-- 视频播放器可能显示为黑色背景
-- 需要支持透明通道的软件才能看到效果
-- 建议用于单帧PNG导出
+- `transparent` 模式输出BGRA四通道PNG帧序列
+- UI会提供zip下载，不使用视频播放器预览
+- CLI传入 `--output result.mp4` 时，实际输出目录为 `result_frames/`
+- 可导入后期软件或再用ffmpeg编码成支持alpha的格式
 
 ### 4. 显存占用
 - **rvm_mobilenetv3**: ~2GB

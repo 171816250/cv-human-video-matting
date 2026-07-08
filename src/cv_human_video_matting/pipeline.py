@@ -21,7 +21,7 @@ from cv_human_video_matting.render.compositor import (
     compose_transparent,
     side_by_side,
 )
-from cv_human_video_matting.utils.paths import ensure_parent_dir
+from cv_human_video_matting.utils.paths import ensure_dir, ensure_parent_dir
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,35 @@ def _load_background(path: str | Path | None):
     if background is None:
         raise ValueError(f"Failed to read background image: {path}")
     return background
+
+
+def _transparent_output_dir(output_path: Path) -> Path:
+    """Resolve the PNG sequence directory for transparent renders.
+
+    Always appends a ``_frames`` suffix so a suffix-less ``--output`` (e.g. a
+    directory path) does not turn an arbitrary existing directory into the
+    frame sink — protecting unrelated ``frame_*.png`` files from deletion.
+    """
+    if output_path.suffix:
+        return output_path.parent / f"{output_path.stem}_frames"
+    return output_path.parent / f"{output_path.name}_frames"
+
+
+def _prepare_png_sequence_dir(output_dir: Path) -> Path:
+    ensure_dir(output_dir)
+    for frame_path in output_dir.glob("frame_*.png"):
+        frame_path.unlink()
+    return output_dir
+
+
+def _write_transparent_frame(output_dir: Path, index: int, frame_bgra: np.ndarray) -> None:
+    if frame_bgra.ndim != 3 or frame_bgra.shape[2] != 4:
+        raise ValueError(
+            "Transparent render mode must produce BGRA frames for PNG sequence output."
+        )
+    frame_path = output_dir / f"frame_{index:06d}.png"
+    if not cv2.imwrite(str(frame_path), frame_bgra):
+        raise ValueError(f"Failed to write transparent PNG frame: {frame_path}")
 
 
 def load_background_image(path: str | Path | None) -> np.ndarray | None:
@@ -151,8 +180,14 @@ def process_video(
     device: str = "cpu",
 ) -> PipelineStats:
     info = probe_video(input_path)
-    output = Path(output_path)
-    ensure_parent_dir(output)
+    requested_output = Path(output_path)
+    output = (
+        _prepare_png_sequence_dir(_transparent_output_dir(requested_output))
+        if mode == "transparent"
+        else requested_output
+    )
+    if mode != "transparent":
+        ensure_parent_dir(output)
     background_bgr = _load_background(background_path)
     temporal_smoother = (
         TemporalAlphaSmoother(blend=temporal_blend) if temporal_smooth else None
@@ -160,6 +195,9 @@ def process_video(
 
     # Initialize depth estimator if enabled
     depth_estimator = DepthEstimator(device=device) if enable_depth else None
+    # Clamp to >= 1 so the per-frame `frame_idx % depth_interval` never divides
+    # by zero when an unvalidated config supplies 0 or a negative value.
+    depth_interval = max(1, depth_interval)
     last_depth_map = None
     frame_idx = 0
 
@@ -191,20 +229,26 @@ def process_video(
     out_height, out_width = first_rendered.shape[:2]
 
     fps = info.fps if info.fps > 0 else 30.0
-    writer = cv2.VideoWriter(
-        str(output),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (out_width, out_height),
-    )
-    if not writer.isOpened():
-        capture.release()
-        raise ValueError(f"Failed to open output video writer: {output}")
+    writer = None
+    if mode != "transparent":
+        writer = cv2.VideoWriter(
+            str(output),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (out_width, out_height),
+        )
+        if not writer.isOpened():
+            capture.release()
+            raise ValueError(f"Failed to open output video writer: {output}")
 
     processed = 0
     started_at = perf_counter()
     try:
-        writer.write(first_rendered)
+        if mode == "transparent":
+            _write_transparent_frame(output, processed, first_rendered)
+        else:
+            assert writer is not None
+            writer.write(first_rendered)
         processed += 1
         frame_idx += 1
 
@@ -229,12 +273,17 @@ def process_video(
                 depth_estimator=depth_estimator,
                 depth_map=last_depth_map,
             )
-            writer.write(rendered)
+            if mode == "transparent":
+                _write_transparent_frame(output, processed, rendered)
+            else:
+                assert writer is not None
+                writer.write(rendered)
             processed += 1
             frame_idx += 1
     finally:
         capture.release()
-        writer.release()
+        if writer is not None:
+            writer.release()
 
     elapsed = perf_counter() - started_at
     effective_fps = processed / elapsed if elapsed > 0 else 0.0

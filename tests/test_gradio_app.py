@@ -31,6 +31,20 @@ def test_build_demo_returns_blocks():
     assert isinstance(demo, gr.Blocks)
 
 
+def test_build_demo_accepts_config_defaults():
+    demo = build_demo(
+        config={
+            "device": {"mode": "cpu"},
+            "matting": {"model": "rvm_mobilenetv3"},
+            "render": {"mode": "green"},
+            "postprocess": {"edge_feather": 1, "enable_temporal_smooth": True},
+            "depth": {"enabled": False},
+        }
+    )
+
+    assert isinstance(demo, gr.Blocks)
+
+
 def test_run_demo_with_dummy_runner_writes_video(tmp_path, monkeypatch):
     monkeypatch.chdir(Path(__file__).resolve().parents[1])
     input_path = tmp_path / "input.mp4"
@@ -53,6 +67,28 @@ def test_run_demo_with_dummy_runner_writes_video(tmp_path, monkeypatch):
     assert Path(output_path).exists()
     assert probe_video(output_path).frame_count == 2
     assert "FPS:" in status
+
+
+def test_run_demo_with_transparent_mode_returns_zip(tmp_path, monkeypatch):
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    input_path = tmp_path / "input.mp4"
+    _write_test_video(input_path)
+
+    output_path, status = run_demo(
+        video_path=str(input_path),
+        background_path=None,
+        model="dummy",
+        mode="transparent",
+        max_frames=2,
+        device="cpu",
+    )
+
+    assert output_path is not None
+    archive_path = Path(output_path)
+    assert archive_path.suffix == ".zip"
+    assert archive_path.exists()
+    assert "PNG frames:" in status
+    assert "Download:" in status
 
 
 def test_prepare_input_preview_returns_existing_video_path(tmp_path):

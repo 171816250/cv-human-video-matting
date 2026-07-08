@@ -110,3 +110,88 @@ def test_matte_command_accepts_postprocess_flags(tmp_path, capsys):
     assert "Matting output:" in captured.out
     assert output_path.exists()
     assert probe_video(output_path).frame_count == 2
+
+
+def test_matte_command_with_transparent_mode_writes_png_sequence(tmp_path, capsys):
+    input_path = tmp_path / "input.mp4"
+    output_path = tmp_path / "transparent.mp4"
+    _write_test_video(input_path)
+
+    main(
+        [
+            "matte",
+            "--model",
+            "dummy",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--mode",
+            "transparent",
+            "--max-frames",
+            "2",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    output_dir = tmp_path / "transparent_frames"
+    frame_paths = sorted(output_dir.glob("frame_*.png"))
+    assert "Matting output:" in captured.out
+    assert not output_path.exists()
+    assert len(frame_paths) == 2
+
+    frame = cv2.imread(str(frame_paths[0]), cv2.IMREAD_UNCHANGED)
+    assert frame is not None
+    assert frame.shape == (24, 32, 4)
+
+
+def test_matte_command_uses_config_defaults(tmp_path, capsys):
+    input_path = tmp_path / "input.mp4"
+    output_path = tmp_path / "from-config.mp4"
+    config_path = tmp_path / "config.yaml"
+    _write_test_video(input_path)
+    config_path.write_text(
+        "\n".join(
+            [
+                "project:",
+                "  name: test-project",
+                "device:",
+                "  mode: cpu",
+                "matting:",
+                "  model: dummy",
+                "render:",
+                "  mode: alpha",
+                "postprocess:",
+                "  enable_temporal_smooth: true",
+                "  temporal_alpha: 0.5",
+                "  edge_feather: 1",
+                "  mask_open: 0",
+                "  mask_close: 1",
+                "depth:",
+                "  enabled: false",
+                "  interval: 5",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    main(
+        [
+            "--config",
+            str(config_path),
+            "matte",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--max-frames",
+            "2",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert "Model: dummy" in captured.out
+    assert "Mode: alpha" in captured.out
+    assert "Device: cpu" in captured.out
+    assert output_path.exists()
+    assert probe_video(output_path).frame_count == 2

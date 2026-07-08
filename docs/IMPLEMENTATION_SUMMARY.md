@@ -53,7 +53,7 @@
 
 - **关键特性**:
   - **背景虚化**: 保留人物清晰，背景高斯模糊（默认45核）
-  - **透明PNG**: 四通道BGRA输出，可用于后期合成
+  - **透明PNG**: 四通道BGRA帧序列输出，可用于后期合成
   - 自动处理奇数核尺寸转换
 
 - **集成点**:
@@ -174,6 +174,7 @@ python app.py matte \
   --mode transparent \
   --device cuda
 ```
+上述命令会输出 `transparent_frames/frame_000000.png` 形式的BGRA PNG帧序列。
 
 ### 3. 三档模型对比
 ```bash
