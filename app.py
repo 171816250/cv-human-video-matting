@@ -1,7 +1,16 @@
 """Application entry point for the iterative video matting project."""
 
+import os
 from pathlib import Path
 import sys
+
+
+# Force a headless matplotlib backend before any import can trigger backend
+# auto-selection. Gradio wraps every request in a MatplotlibBackendManager that
+# calls matplotlib.get_backend(); with PyQt5 installed, matplotlib would try the
+# Qt backend, which crashes on some PyQt5/matplotlib version combos and breaks
+# live-camera streaming. Agg is non-interactive and always safe for a server.
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent

@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+import os
+
+# Gradio wraps each request in a MatplotlibBackendManager that probes
+# matplotlib's backend; with PyQt5 present, matplotlib may pick the Qt backend
+# and crash on some version combos, breaking live-camera streaming. Force the
+# headless Agg backend before gradio (and thus matplotlib) is imported.
+os.environ.setdefault("MPLBACKEND", "Agg")
+try:  # pragma: no cover - defensive; Agg is always available with matplotlib
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+except Exception:
+    pass
+
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -538,6 +552,17 @@ def _build_css() -> str:
         gap: 14px !important;
     }
 
+    .live-hint {
+        margin: 0 14px 14px;
+        padding: 10px 14px;
+        border-radius: 10px;
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
+        color: #1e3a5f;
+        font-size: 13px;
+        line-height: 1.6;
+    }
+
     .result-grid {
         margin-top: 18px;
         gap: 18px !important;
@@ -871,6 +896,12 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                         height=420,
                                         interactive=False,
                                     )
+                                gr.HTML(
+                                    "<div class=\"live-hint\">👉 点击摄像头下方的红色 ● 按钮开始实时抠图。"
+                                    "首帧需加载模型（约 10 秒），之后实时更新。"
+                                    "<br/>👉 Click the red ● button under the camera to start. "
+                                    "The first frame loads the model (~10s), then streams live.</div>"
+                                )
                             with gr.Group(elem_classes=["panel"]):
                                 gr.HTML(_panel_header("Live Status", "current frame timing"))
                                 live_status = gr.Textbox(
