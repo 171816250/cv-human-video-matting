@@ -19,7 +19,7 @@ class TemporalAlphaSmoother:
     def apply(self, alpha: np.ndarray) -> np.ndarray:
         alpha_u8 = _as_uint8_alpha(alpha)
         current = alpha_u8.astype(np.float32)
-        if self._previous is None:
+        if self._previous is None or self._previous.shape != current.shape:
             self._previous = current
             return alpha_u8
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn.functional as F
+from cv_human_video_matting.render.compositor import normalize_alpha
 
 
 class DepthEstimator:
@@ -97,11 +98,12 @@ class DepthEstimator:
             - distance_label: "Near", "Mid", "Far", or "No person detected".
         """
         # Ensure alpha is 2D
-        if alpha.ndim == 3:
-            alpha = alpha[:, :, 0]
+        alpha = normalize_alpha(alpha)[:, :, 0]
+        if depth.shape != alpha.shape:
+            raise ValueError("Depth and alpha must have matching spatial dimensions.")
 
         # Create person mask
-        mask = alpha > thresh
+        mask = (alpha > thresh) & np.isfinite(depth)
 
         # Check if person region is large enough
         if mask.sum() < 50:

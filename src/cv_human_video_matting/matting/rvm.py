@@ -21,10 +21,14 @@ class RVMRunner:
         model_name: str = "mobilenetv3",
         checkpoint: str | Path | None = None,
         device: str = "cpu",
-        downsample_ratio: float = 1.0,
+        downsample_ratio: float | str = 1.0,
     ) -> None:
         self.device = torch.device(device)
-        self.downsample_ratio = downsample_ratio
+        self.downsample_ratio = (
+            "auto" if downsample_ratio == "auto" else float(downsample_ratio)
+        )
+        if self.downsample_ratio != "auto" and not 0 < self.downsample_ratio <= 1:
+            raise ValueError("downsample_ratio must be 'auto' or in (0, 1].")
         self.model = torch.hub.load(
             RVM_HUB_REF,
             model_name,
@@ -36,14 +40,27 @@ class RVMRunner:
             self.model.load_state_dict(state)
         self.model = self.model.to(self.device).eval()
         self._rec = [None, None, None, None]
+        self._frame_shape = None
+
+    def reset(self) -> None:
+        """Discard recurrent state between videos or resolution changes."""
+        self._rec = [None, None, None, None]
+        self._frame_shape = None
 
     def predict(self, frame_bgr: np.ndarray) -> MattingResult:
+        if self._frame_shape != frame_bgr.shape:
+            self.reset()
+            self._frame_shape = frame_bgr.shape
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         tensor = torch.from_numpy(frame_rgb).to(self.device)
         tensor = tensor.permute(2, 0, 1).float().div(255.0).unsqueeze(0)
 
         with torch.no_grad():
-            output = self.model(tensor, *self._rec, downsample_ratio=self.downsample_ratio)
+            ratio = (
+                min(1.0, 512.0 / max(frame_bgr.shape[:2]))
+                if self.downsample_ratio == "auto" else self.downsample_ratio
+            )
+            output = self.model(tensor, *self._rec, downsample_ratio=ratio)
 
         foreground, alpha, *rec = output
         self._rec = rec[:4]

@@ -55,8 +55,8 @@ def _transparent_output_dir(output_path: Path) -> Path:
 
 def _prepare_png_sequence_dir(output_dir: Path) -> Path:
     ensure_dir(output_dir)
-    for frame_path in output_dir.glob("frame_*.png"):
-        frame_path.unlink()
+    if any(output_dir.glob("frame_*.png")):
+        raise ValueError(f"PNG sequence already exists; choose a new output path: {output_dir}")
     return output_dir
 
 
@@ -75,23 +75,24 @@ def load_background_image(path: str | Path | None) -> np.ndarray | None:
     return _load_background(path)
 
 
-def _render_frame(frame_bgr, alpha, mode: str, background_bgr=None):
+def _render_frame(frame_bgr, alpha, mode: str, background_bgr=None, foreground_bgr=None):
+    foreground = frame_bgr if foreground_bgr is None else foreground_bgr
     if mode == "alpha":
         return alpha_to_bgr(alpha)
     if mode == "green":
-        return compose_on_color(frame_bgr, alpha, color_bgr=(0, 255, 0))
+        return compose_on_color(foreground, alpha, color_bgr=(0, 255, 0))
     if mode == "foreground":
-        return compose_on_color(frame_bgr, alpha, color_bgr=(0, 0, 0))
+        return compose_on_color(foreground, alpha, color_bgr=(0, 0, 0))
     if mode == "blur":
-        return compose_on_blur(frame_bgr, alpha, blur_ksize=45)
+        return compose_on_blur(frame_bgr, alpha, blur_ksize=45, foreground_bgr=foreground)
     if mode == "transparent":
-        return compose_transparent(frame_bgr, alpha)
+        return compose_transparent(foreground, alpha)
     if mode == "image":
         if background_bgr is None:
             raise ValueError("Render mode 'image' requires a background image.")
-        return compose_on_image(frame_bgr, alpha, background_bgr)
+        return compose_on_image(foreground, alpha, background_bgr)
     if mode == "side_by_side":
-        composed = compose_on_color(frame_bgr, alpha, color_bgr=(0, 255, 0))
+        composed = compose_on_color(foreground, alpha, color_bgr=(0, 255, 0))
         return side_by_side(frame_bgr, composed)
     raise ValueError(f"Unsupported render mode: {mode}")
 
@@ -133,7 +134,7 @@ def render_matting_frame(
         mask_close=mask_close,
         temporal_smoother=temporal_smoother,
     )
-    rendered = _render_frame(frame_bgr, alpha, mode, background_bgr)
+    rendered = _render_frame(frame_bgr, alpha, mode, background_bgr, result.foreground)
 
     # Add distance labeling if depth estimator is provided
     if depth_estimator is not None and mode not in ("transparent", "alpha"):
@@ -179,117 +180,79 @@ def process_video(
     depth_interval: int = 5,
     device: str = "cpu",
 ) -> PipelineStats:
-    info = probe_video(input_path)
+    # Validate before opening a writer or modifying an existing output.
+    started_at = perf_counter()
+    if mode not in {"alpha", "green", "foreground", "blur", "transparent", "image", "side_by_side"}:
+        raise ValueError(f"Unsupported render mode: {mode}")
+    if max_frames is not None and max_frames <= 0:
+        raise ValueError("max_frames must be positive or None.")
+    if min(edge_feather, mask_open, mask_close) < 0:
+        raise ValueError("Postprocessing radii must be non-negative.")
     requested_output = Path(output_path)
-    output = (
-        _prepare_png_sequence_dir(_transparent_output_dir(requested_output))
-        if mode == "transparent"
-        else requested_output
-    )
-    if mode != "transparent":
-        ensure_parent_dir(output)
+    if Path(input_path).resolve() == requested_output.resolve():
+        raise ValueError("Input and output paths must be different.")
     background_bgr = _load_background(background_path)
+    if mode == "image" and background_bgr is None:
+        raise ValueError("Render mode 'image' requires a background image.")
+    info = probe_video(input_path)
     temporal_smoother = (
         TemporalAlphaSmoother(blend=temporal_blend) if temporal_smooth else None
     )
-
-    # Initialize depth estimator if enabled
-    depth_estimator = DepthEstimator(device=device) if enable_depth else None
-    # Clamp to >= 1 so the per-frame `frame_idx % depth_interval` never divides
-    # by zero when an unvalidated config supplies 0 or a negative value.
-    depth_interval = max(1, depth_interval)
-    last_depth_map = None
-    frame_idx = 0
-
-    capture = cv2.VideoCapture(str(info.path))
-    if not capture.isOpened():
-        raise ValueError(f"Failed to open input video: {info.path}")
-
-    first_ok, first_frame = capture.read()
-    if not first_ok:
-        capture.release()
-        raise ValueError(f"Input video has no readable frames: {info.path}")
-
-    # Compute depth for first frame if enabled
-    if depth_estimator is not None:
-        last_depth_map = depth_estimator.estimate(first_frame)
-
-    first_rendered, _ = render_matting_frame(
-        first_frame,
-        runner=runner,
-        mode=mode,
-        background_bgr=background_bgr,
-        edge_feather=edge_feather,
-        mask_open=mask_open,
-        mask_close=mask_close,
-        temporal_smoother=temporal_smoother,
-        depth_estimator=depth_estimator,
-        depth_map=last_depth_map,
+    depth_estimator = (
+        DepthEstimator(device=device) if enable_depth and mode not in {"alpha", "transparent"}
+        else None
     )
-    out_height, out_width = first_rendered.shape[:2]
-
-    fps = info.fps if info.fps > 0 else 30.0
+    depth_interval = max(1, depth_interval)
+    reset = getattr(runner, "reset", None)
+    if callable(reset):
+        reset()
+    output = (
+        _transparent_output_dir(requested_output) if mode == "transparent" else requested_output
+    )
+    capture = cv2.VideoCapture(str(info.path))
     writer = None
-    if mode != "transparent":
-        writer = cv2.VideoWriter(
-            str(output),
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            fps,
-            (out_width, out_height),
-        )
-        if not writer.isOpened():
-            capture.release()
-            raise ValueError(f"Failed to open output video writer: {output}")
-
     processed = 0
-    started_at = perf_counter()
+    last_depth_map = None
     try:
-        if mode == "transparent":
-            _write_transparent_frame(output, processed, first_rendered)
-        else:
-            assert writer is not None
-            writer.write(first_rendered)
-        processed += 1
-        frame_idx += 1
-
+        if not capture.isOpened():
+            raise ValueError(f"Failed to open input video: {info.path}")
         while max_frames is None or processed < max_frames:
             ok, frame = capture.read()
             if not ok:
                 break
-
-            # Update depth map at intervals
-            if depth_estimator is not None and frame_idx % depth_interval == 0:
+            if depth_estimator is not None and processed % depth_interval == 0:
                 last_depth_map = depth_estimator.estimate(frame)
-
             rendered, _ = render_matting_frame(
-                frame,
-                runner=runner,
-                mode=mode,
-                background_bgr=background_bgr,
-                edge_feather=edge_feather,
-                mask_open=mask_open,
-                mask_close=mask_close,
-                temporal_smoother=temporal_smoother,
-                depth_estimator=depth_estimator,
+                frame, runner=runner, mode=mode, background_bgr=background_bgr,
+                edge_feather=edge_feather, mask_open=mask_open, mask_close=mask_close,
+                temporal_smoother=temporal_smoother, depth_estimator=depth_estimator,
                 depth_map=last_depth_map,
             )
+            if processed == 0:
+                if mode == "transparent":
+                    _prepare_png_sequence_dir(output)
+                else:
+                    ensure_parent_dir(output)
+                    height, width = rendered.shape[:2]
+                    writer = cv2.VideoWriter(
+                        str(output), cv2.VideoWriter_fourcc(*"mp4v"),
+                        info.fps if info.fps > 0 else 30.0, (width, height),
+                    )
+                    if not writer.isOpened():
+                        raise ValueError(f"Failed to open output video writer: {output}")
             if mode == "transparent":
                 _write_transparent_frame(output, processed, rendered)
             else:
-                assert writer is not None
                 writer.write(rendered)
             processed += 1
-            frame_idx += 1
+        if processed == 0:
+            raise ValueError(f"Input video has no readable frames: {info.path}")
     finally:
         capture.release()
         if writer is not None:
             writer.release()
-
     elapsed = perf_counter() - started_at
-    effective_fps = processed / elapsed if elapsed > 0 else 0.0
     return PipelineStats(
-        output_path=output,
-        frames=processed,
-        elapsed_seconds=elapsed,
-        fps=effective_fps,
+        output_path=output, frames=processed, elapsed_seconds=elapsed,
+        fps=processed / elapsed if elapsed > 0 else 0.0,
     )

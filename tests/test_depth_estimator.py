@@ -2,6 +2,8 @@
 
 import numpy as np
 import pytest
+import torch
+from types import SimpleNamespace
 
 from cv_human_video_matting.depth import DepthEstimator, draw_distance_label
 
@@ -23,6 +25,28 @@ def sample_alpha():
 
 class TestDepthEstimator:
     """Tests for DepthEstimator class."""
+
+    @pytest.fixture(autouse=True)
+    def fake_midas(self, monkeypatch):
+        class Model:
+            def eval(self):
+                return self
+
+            def to(self, device):
+                return self
+
+            def __call__(self, tensor):
+                return tensor.mean(dim=1)
+
+        def transform(rgb):
+            return torch.from_numpy(rgb.copy()).permute(2, 0, 1).float().unsqueeze(0)
+
+        def load(repo, name, **kwargs):
+            if name == "transforms":
+                return SimpleNamespace(small_transform=transform, dpt_transform=transform)
+            return Model()
+
+        monkeypatch.setattr(torch.hub, "load", load)
 
     def test_estimator_initialization(self):
         """Test that DepthEstimator initializes correctly."""

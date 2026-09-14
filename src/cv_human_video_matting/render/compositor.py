@@ -90,6 +90,7 @@ def compose_on_blur(
     frame_bgr: np.ndarray,
     alpha: np.ndarray,
     blur_ksize: int = 45,
+    foreground_bgr: np.ndarray | None = None,
 ) -> np.ndarray:
     """Compose foreground on blurred background (bokeh effect).
 
@@ -102,7 +103,7 @@ def compose_on_blur(
         Composed image with blurred background (HxWx3, uint8).
     """
     alpha_f32 = normalize_alpha(alpha)
-    foreground = frame_bgr.astype(np.float32)
+    foreground = (frame_bgr if foreground_bgr is None else foreground_bgr).astype(np.float32)
 
     # Ensure kernel size is odd
     k = blur_ksize if blur_ksize % 2 == 1 else blur_ksize + 1

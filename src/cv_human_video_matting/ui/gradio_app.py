@@ -21,11 +21,13 @@ from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 from zipfile import ZIP_DEFLATED, ZipFile
+from uuid import uuid4
 
 import cv2
 import gradio as gr
 import numpy as np
 
+from cv_human_video_matting.depth import DepthEstimator
 from cv_human_video_matting.io.video import ensure_browser_playable_video
 from cv_human_video_matting.matting.base import MattingRunner
 from cv_human_video_matting.matting.factory import create_matting_runner
@@ -70,6 +72,8 @@ class LiveRunnerCache:
     temporal_smoother: TemporalAlphaSmoother | None = None
     frames: int = 0
     started_at: float = 0.0
+    depth_estimator: DepthEstimator | None = None
+    depth_map: np.ndarray | None = None
 
 
 _LIVE_CACHE = LiveRunnerCache()
@@ -85,7 +89,7 @@ class BatchDemoResult:
 def _timestamped_output_path(mode: str) -> Path:
     ensure_dir(OUTPUT_DIR)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return OUTPUT_DIR / f"gradio_{timestamp}_{mode}.mp4"
+    return OUTPUT_DIR / f"gradio_{timestamp}_{uuid4().hex[:12]}_{mode}.mp4"
 
 
 def _zip_png_sequence(sequence_dir: str | Path) -> Path:
@@ -125,17 +129,23 @@ def _live_cache_for(
     device: str,
     temporal_smooth: bool,
     temporal_blend: float,
+    cache: LiveRunnerCache | None = None,
 ) -> LiveRunnerCache:
+    cache = cache if cache is not None else _LIVE_CACHE
     key = (model, device, bool(temporal_smooth), round(float(temporal_blend), 3))
-    if _LIVE_CACHE.runner is None or _LIVE_CACHE.key != key:
-        _LIVE_CACHE.key = key
-        _LIVE_CACHE.runner = create_matting_runner(model=model, device=device)
-        _LIVE_CACHE.temporal_smoother = (
+    if cache.runner is None or cache.key != key:
+        runner = create_matting_runner(model=model, device=device,
+            downsample_ratio=config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"))
+        cache.key = key
+        cache.runner = runner
+        cache.temporal_smoother = (
             TemporalAlphaSmoother(blend=temporal_blend) if temporal_smooth else None
         )
-        _LIVE_CACHE.frames = 0
-        _LIVE_CACHE.started_at = perf_counter()
-    return _LIVE_CACHE
+        cache.depth_estimator = None
+        cache.depth_map = None
+        cache.frames = 0
+        cache.started_at = perf_counter()
+    return cache
 
 
 def reset_live_state() -> str:
@@ -144,6 +154,8 @@ def reset_live_state() -> str:
     _LIVE_CACHE.temporal_smoother = None
     _LIVE_CACHE.frames = 0
     _LIVE_CACHE.started_at = 0.0
+    _LIVE_CACHE.depth_estimator = None
+    _LIVE_CACHE.depth_map = None
     return "Live state reset. The next frame will reload the selected model."
 
 
@@ -175,8 +187,12 @@ def _run_batch_demo(
 
     actual_device = resolve_device(device)
     output_path = _timestamped_output_path(mode)
-    checkpoint = config_value(_ACTIVE_CONFIG, "matting.checkpoint")
-    runner = create_matting_runner(model=model, checkpoint=checkpoint, device=actual_device)
+    checkpoint = (
+        config_value(_ACTIVE_CONFIG, "matting.checkpoint")
+        if model == config_value(_ACTIVE_CONFIG, "matting.model") else None
+    )
+    runner = create_matting_runner(model=model, checkpoint=checkpoint, device=actual_device,
+        downsample_ratio=config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"))
     stats = process_video(
         input_path=video_path,
         output_path=output_path,
@@ -301,6 +317,9 @@ def render_live_frame(
     mask_close: int = 0,
     temporal_smooth: bool = False,
     temporal_blend: float = 0.75,
+    enable_depth: bool = False,
+    depth_interval: int = 5,
+    cache: LiveRunnerCache | None = None,
 ) -> tuple[np.ndarray | None, str]:
     if frame_rgb is None:
         return None, "Waiting for camera frame."
@@ -316,11 +335,21 @@ def render_live_frame(
         device=actual_device,
         temporal_smooth=temporal_smooth,
         temporal_blend=temporal_blend,
+        cache=cache,
     )
     if cache.runner is None:
         return None, "Live model failed to initialize."
 
     started_at = perf_counter()
+    if enable_depth and mode != "alpha":
+        if cache.depth_estimator is None:
+            cache.depth_estimator = DepthEstimator(device=actual_device)
+        if (cache.depth_map is None or cache.depth_map.shape != frame_bgr.shape[:2]
+                or cache.frames % max(1, int(depth_interval)) == 0):
+            cache.depth_map = cache.depth_estimator.estimate(frame_bgr)
+    else:
+        cache.depth_estimator = None
+        cache.depth_map = None
     rendered_bgr, _ = render_matting_frame(
         frame_bgr,
         runner=cache.runner,
@@ -330,6 +359,8 @@ def render_live_frame(
         mask_open=mask_open,
         mask_close=mask_close,
         temporal_smoother=cache.temporal_smoother,
+        depth_estimator=cache.depth_estimator,
+        depth_map=cache.depth_map,
     )
     elapsed = perf_counter() - started_at
     cache.frames += 1
@@ -344,6 +375,17 @@ def render_live_frame(
         f"Device: {actual_device}"
     )
     return rendered_rgb, status
+
+
+def render_live_frame_for_ui(*args):
+    # gr.State supplies an independent cache for each browser session.
+    cache = args[-1]
+    image, status = render_live_frame(*args[:-1], cache=cache)
+    return image, status, cache
+
+
+def reset_live_session():
+    return "Live state reset.", LiveRunnerCache()
 
 
 def _panel_header(title: str, meta: str) -> str:
@@ -976,6 +1018,9 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                             value=temporal_blend_default,
                                             step=0.05,
                                         )
+                                    live_depth = gr.Checkbox(label="Relative Distance (Near / Mid / Far)", value=False)
+                                    live_depth_interval = gr.Slider(label="Depth Update Interval", minimum=1, maximum=30, value=5, step=1)
+                                    live_session = gr.State(LiveRunnerCache())
                                     reset_live_button = gr.Button(
                                         "Reset Live State",
                                         elem_classes=["secondary-action"],
@@ -1008,7 +1053,7 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
             )
 
             live_camera.stream(
-                fn=render_live_frame,
+                fn=render_live_frame_for_ui,
                 inputs=[
                     live_camera,
                     live_background,
@@ -1021,16 +1066,19 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                     live_mask_close,
                     live_temporal_smooth,
                     live_temporal_blend,
+                    live_depth,
+                    live_depth_interval,
+                    live_session,
                 ],
-                outputs=[live_output, live_status],
+                outputs=[live_output, live_status, live_session],
                 trigger_mode="always_last",
                 concurrency_limit=1,
             )
 
             reset_live_button.click(
-                fn=reset_live_state,
+                fn=reset_live_session,
                 inputs=None,
-                outputs=[live_status],
+                outputs=[live_status, live_session],
             )
 
     demo.queue(default_concurrency_limit=2)

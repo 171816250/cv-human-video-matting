@@ -2,6 +2,28 @@
 
 基于深度学习的自然场景人像视频抠像与背景消除系统。
 
+## 开源孵化工程验收
+
+当前工程对照申报目标的交付状态见 [孵化清单](docs/INCUBATION_CHECKLIST.md)。
+参与开发见 [贡献指南](CONTRIBUTING.md)，接口说明见 [API文档](docs/API.md)，
+真实视频效果和速度验证见 [评测方法](docs/EVALUATION.md)。
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -B -m pytest -q
+python app.py matte --input data/input/demo.mp4 --output data/output/result.mp4 --model rvm_mobilenetv3 --device auto --report data/output/result.json
+```
+
+`--report` 保存输入分辨率、实际设备、依赖版本、处理参数和耗时。处理计时包含首帧，
+另记录模型加载加处理的总耗时；这与下方历史冒烟测试的计时口径不同。
+默认测试使用模型替身且禁止模型下载，真实抠像质量需单独验证。
+实时摄像头可打开 Relative Distance 显示相对远近，并按浏览器会话隔离时序状态。
+距离标注当前使用 MiDaS；Depth Anything 为可选后续评估。
+RVM现在读取 `matting.downsample_ratio`，默认 `auto` 将内部推理长边限制到512像素以内，
+仍输出原始尺寸。可用 `--downsample-ratio 1` 保留全尺度推理；降采样的速度与边缘质量需对比验证。
+透明输出为PNG序列，已有帧目录拒绝覆盖。普通视频导出目前不保留音轨。
+本仓库现有许可证为 MulanPSL-2.0；托管发布和社区目标的完成情况以实际平台记录为准。
+
 本项目提供实时保留人物、消除任意复杂动态背景，输出高精度软 alpha（保留发丝/半透明衣物边缘），时序稳定不闪烁，并支持人物距离估计标注。
 
 ## ✨ 核心特性

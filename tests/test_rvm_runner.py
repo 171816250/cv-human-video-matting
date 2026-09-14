@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import pytest
 
 from cv_human_video_matting.matting.rvm import RVMRunner
 
@@ -51,3 +52,29 @@ def test_rvm_runner_pins_torch_hub_ref_to_avoid_default_branch_probe(monkeypatch
     args, kwargs = calls[0]
     assert args[0] == "PeterL1n/RobustVideoMatting:master"
     assert kwargs["trust_repo"] is True
+
+
+def test_rvm_resets_recurrent_state_for_new_resolution(monkeypatch):
+    monkeypatch.setattr(torch.hub, "load", lambda *a, **k: _FakeRVMModel())
+    runner = RVMRunner(device="cpu")
+    runner.predict(np.zeros((8, 10, 3), np.uint8))
+    runner._rec = ["old"] * 4
+    runner.reset()
+    assert runner._rec == [None] * 4
+    runner.predict(np.zeros((12, 16, 3), np.uint8))
+    assert runner._frame_shape == (12, 16, 3)
+
+
+def test_rvm_auto_scale_limits_internal_long_side(monkeypatch):
+    model = _FakeRVMModel()
+    monkeypatch.setattr(torch.hub, "load", lambda *a, **k: model)
+    runner = RVMRunner(downsample_ratio="auto")
+    result = runner.predict(np.zeros((576, 1024, 3), np.uint8))
+    assert model.downsample_ratio == 0.5
+    assert result.alpha.shape == (576, 1024)
+
+
+@pytest.mark.parametrize("ratio", [0, -0.5, 2, "invalid"])
+def test_rvm_rejects_invalid_scale_before_loading_model(ratio):
+    with pytest.raises(ValueError):
+        RVMRunner(downsample_ratio=ratio)

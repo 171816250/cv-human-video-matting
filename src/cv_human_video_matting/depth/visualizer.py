@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+from cv_human_video_matting.render.compositor import normalize_alpha
 
 
 def draw_distance_label(
@@ -29,8 +30,7 @@ def draw_distance_label(
     output = frame_bgr.copy()
 
     # Ensure alpha is 2D
-    if alpha.ndim == 3:
-        alpha = alpha[:, :, 0]
+    alpha = normalize_alpha(alpha)[:, :, 0]
 
     # Create person mask
     mask = (alpha > thresh).astype(np.uint8)

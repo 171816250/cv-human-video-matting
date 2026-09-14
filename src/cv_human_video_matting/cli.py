@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from time import perf_counter
 
 from cv_human_video_matting.io.video import copy_video, probe_video
 from cv_human_video_matting.matting.factory import create_matting_runner
@@ -46,6 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     matte_parser = subparsers.add_parser("matte", help="Run video matting on an input video.")
     matte_parser.add_argument("--input", required=True, help="Input video path.")
+    matte_parser.add_argument("--report", help="Optional JSON performance report path.")
+    matte_parser.add_argument("--downsample-ratio", default=None,
+                              help="RVM inference scale: auto or a number in (0, 1].")
     matte_parser.add_argument(
         "--output",
         required=True,
@@ -156,9 +160,13 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "matte":
+        if args.report and Path(args.report).resolve() in {
+            Path(args.input).resolve(), Path(args.output).resolve()
+        }:
+            parser.error("Report path must differ from input and output paths.")
         model = args.model or config_value(config, "matting.model", "rvm_mobilenetv3")
         checkpoint = args.checkpoint
-        if checkpoint is None:
+        if checkpoint is None and model == config_value(config, "matting.model", "rvm_mobilenetv3"):
             checkpoint = config_value(config, "matting.checkpoint")
         requested_device = args.device or config_value(config, "device.mode", "auto")
         device = resolve_device(requested_device)
@@ -198,10 +206,13 @@ def main(argv: list[str] | None = None) -> None:
             if args.depth_interval is not None
             else config_int(config, "depth.interval", 5)
         )
+        started_at = perf_counter()
+        downsample_ratio = args.downsample_ratio or config_value(config, "matting.downsample_ratio", "auto")
         runner = create_matting_runner(
             model=model,
             checkpoint=checkpoint,
             device=device,
+            downsample_ratio=downsample_ratio,
         )
         stats = process_video(
             input_path=args.input,
@@ -219,6 +230,19 @@ def main(argv: list[str] | None = None) -> None:
             depth_interval=depth_interval,
             device=device,
         )
+        total_seconds = perf_counter() - started_at
+        if args.report:
+            from cv_human_video_matting.reporting import write_run_report
+
+            report = write_run_report(args.report, args.input, stats, {
+                "model": model, "checkpoint": checkpoint, "device": device, "mode": mode,
+                "downsample_ratio": downsample_ratio,
+                "max_frames": args.max_frames, "background": args.background,
+                "edge_feather": edge_feather, "mask_open": mask_open, "mask_close": mask_close,
+                "temporal_smooth": temporal_smooth, "temporal_blend": temporal_blend,
+                "enable_depth": enable_depth, "depth_interval": depth_interval,
+            }, total_seconds)
+            print(f"Run report: {report}")
         print(f"Matting output: {stats.output_path}")
         print(f"Model: {model}")
         print(f"Mode: {mode}")
