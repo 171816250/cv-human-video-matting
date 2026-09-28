@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import shutil
+from tempfile import TemporaryDirectory
 from time import perf_counter
 
 import cv2
@@ -21,8 +24,11 @@ from cv_human_video_matting.render.compositor import (
     compose_transparent,
     side_by_side,
 )
-from cv_human_video_matting.utils.paths import ensure_dir, ensure_parent_dir
+from cv_human_video_matting.utils.paths import ensure_parent_dir
 from cv_human_video_matting.utils.config import validate_project_config
+from cv_human_video_matting.utils.progress import (
+    CancelCallback, ProgressCallback, check_cancelled,
+)
 
 
 @dataclass(frozen=True)
@@ -55,10 +61,46 @@ def _transparent_output_dir(output_path: Path) -> Path:
 
 
 def _prepare_png_sequence_dir(output_dir: Path) -> Path:
-    ensure_dir(output_dir)
+    if output_dir.exists() and not output_dir.is_dir():
+        raise ValueError(f"PNG output path is not a directory: {output_dir}")
     if any(output_dir.glob("frame_*.png")):
         raise ValueError(f"PNG sequence already exists; choose a new output path: {output_dir}")
     return output_dir
+
+
+def _commit_png_sequence(
+    staging: Path, output: Path, should_cancel: CancelCallback | None,
+) -> None:
+    """Publish a complete sequence, preserving unrelated pre-existing files."""
+    check_cancelled(should_cancel)
+    _prepare_png_sequence_dir(output)
+    if not output.exists():
+        staging.rename(output)
+        return
+
+    # Existing directories may contain notes or other user files. Create each
+    # destination exclusively, and roll back only the exact files we created if
+    # cancellation, an I/O failure or a competing writer prevents completion.
+    published = []
+    try:
+        for source in sorted(staging.glob("frame_*.png")):
+            check_cancelled(should_cancel)
+            target = output / source.name
+            with target.open("xb") as destination:
+                identity = os.fstat(destination.fileno())
+                published.append((target, identity.st_dev, identity.st_ino))
+                with source.open("rb") as incoming:
+                    shutil.copyfileobj(incoming, destination)
+        check_cancelled(should_cancel)
+    except BaseException:
+        for target, device, inode in reversed(published):
+            try:
+                identity = target.stat()
+                if (identity.st_dev, identity.st_ino) == (device, inode):
+                    target.unlink()
+            except FileNotFoundError:
+                pass
+        raise
 
 
 def _write_transparent_frame(output_dir: Path, index: int, frame_bgra: np.ndarray) -> None:
@@ -215,9 +257,19 @@ def process_video(
     depth_near: float = 0.66,
     depth_mid: float = 0.33,
     background_color_bgr: tuple[int, int, int] = (0, 255, 0),
+    progress_callback: ProgressCallback | None = None,
+    should_cancel: CancelCallback | None = None,
 ) -> PipelineStats:
+    """Process video with per-frame progress and cooperative cancellation.
+
+    Progress includes an initial ``(0, total)`` notification. ``total`` is the
+    source frame count limited by ``max_frames``, or None for unknown metadata.
+    Cancellation is checked between expensive operations and before publishing
+    transparent output. The caller owns any intermediate nontransparent MP4.
+    """
     # Validate before opening a writer or modifying an existing output.
     started_at = perf_counter()
+    check_cancelled(should_cancel)
     if mode not in {"alpha", "green", "foreground", "blur", "transparent", "image", "side_by_side"}:
         raise ValueError(f"Unsupported render mode: {mode}")
     if max_frames is not None and (
@@ -239,6 +291,12 @@ def process_video(
     if mode == "image" and background_bgr is None:
         raise ValueError("Render mode 'image' requires a background image.")
     info = probe_video(input_path)
+    total_frames = info.frame_count if info.frame_count > 0 else None
+    if total_frames is not None and max_frames is not None:
+        total_frames = min(total_frames, max_frames)
+    if progress_callback is not None:
+        progress_callback(0, total_frames)
+    check_cancelled(should_cancel)
     temporal_smoother = (
         TemporalAlphaSmoother(blend=temporal_blend) if temporal_smooth else None
     )
@@ -254,8 +312,12 @@ def process_video(
     output = (
         _transparent_output_dir(requested_output) if mode == "transparent" else requested_output
     )
+    check_cancelled(should_cancel)
+    if mode == "transparent":
+        _prepare_png_sequence_dir(output)
     capture = cv2.VideoCapture(str(info.path))
     writer = None
+    staging = None
     processed = 0
     last_depth_map = None
     source_shape = None
@@ -264,7 +326,11 @@ def process_video(
     try:
         if not capture.isOpened():
             raise ValueError(f"Failed to open input video: {info.path}")
+        if mode == "transparent":
+            ensure_parent_dir(output)
+            staging = TemporaryDirectory(prefix=f".{output.name}-", dir=output.parent)
         while max_frames is None or processed < max_frames:
+            check_cancelled(should_cancel)
             ok, frame = capture.read()
             if not ok:
                 break
@@ -277,6 +343,7 @@ def process_video(
                 frame = cv2.resize(frame, frame_size, interpolation=cv2.INTER_AREA)
             if depth_estimator is not None and processed % depth_interval == 0:
                 last_depth_map = depth_estimator.estimate(frame)
+            check_cancelled(should_cancel)
             rendered, _ = render_matting_frame(
                 frame, runner=runner, mode=mode, background_bgr=background_bgr,
                 edge_feather=edge_feather, mask_open=mask_open, mask_close=mask_close,
@@ -284,6 +351,7 @@ def process_video(
                 depth_map=last_depth_map,
                 background_color_bgr=background_color_bgr,
             )
+            check_cancelled(should_cancel)
             # OpenCV's MP4 writer silently truncates odd rows/columns. Pad only
             # the final video frame so source pixels, alpha and depth stay aligned.
             # PNG sequences retain their exact rendered dimensions.
@@ -296,9 +364,7 @@ def process_video(
                     )
             if processed == 0:
                 rendered_shape = rendered.shape
-                if mode == "transparent":
-                    _prepare_png_sequence_dir(output)
-                else:
+                if mode != "transparent":
                     ensure_parent_dir(output)
                     height, width = rendered.shape[:2]
                     writer = cv2.VideoWriter(
@@ -310,16 +376,23 @@ def process_video(
             elif rendered.shape != rendered_shape:
                 raise ValueError("Rendered frame dimensions changed during processing.")
             if mode == "transparent":
-                _write_transparent_frame(output, processed, rendered)
+                _write_transparent_frame(Path(staging.name), processed, rendered)
             else:
                 writer.write(rendered)
             processed += 1
+            if progress_callback is not None:
+                progress_callback(processed, total_frames)
+        check_cancelled(should_cancel)
         if processed == 0:
             raise ValueError(f"Input video has no readable frames: {info.path}")
+        if staging is not None:
+            _commit_png_sequence(Path(staging.name), output, should_cancel)
     finally:
         capture.release()
         if writer is not None:
             writer.release()
+        if staging is not None:
+            staging.cleanup()
     elapsed = perf_counter() - started_at
     return PipelineStats(
         output_path=output, frames=processed, elapsed_seconds=elapsed,

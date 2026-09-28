@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
+from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 from uuid import uuid4
 
@@ -40,6 +41,8 @@ from cv_human_video_matting.postprocess import TemporalAlphaSmoother
 from cv_human_video_matting.utils.config import config_value, parse_background_color, validate_project_config
 from cv_human_video_matting.utils.device import resolve_device
 from cv_human_video_matting.utils.paths import ensure_dir
+from cv_human_video_matting.utils.progress import ProcessingCancelled
+from cv_human_video_matting.ui.jobs import BatchJobs
 
 
 OUTPUT_DIR = Path("data/output")
@@ -54,15 +57,19 @@ BATCH_MODE_CHOICES = [
 ]
 LIVE_MODE_CHOICES = ["green", "blur", "image", "alpha", "foreground", "side_by_side"]
 MODEL_CHOICES = [
-    ("RVM MobileNetV3 (Fast)", "rvm_mobilenetv3"),
-    ("RVM ResNet50 (Balanced)", "rvm_resnet50"),
-    ("BiRefNet (Experimental)", "birefnet"),
+    ("RVM MobileNetV3 · 轻量", "rvm_mobilenetv3"),
+    ("RVM ResNet50 · 大模型", "rvm_resnet50"),
+    ("BiRefNet · 实验后端", "birefnet"),
 ]
 MODEL_VALUES = [choice[1] for choice in MODEL_CHOICES]
+MODE_LABELS = {"green": "纯色背景", "blur": "背景虚化", "transparent": "透明PNG序列",
+               "image": "图片背景", "alpha": "遮罩预览", "foreground": "黑底前景",
+               "side_by_side": "原片与结果对比"}
 
 # Active project config, set by build_demo so batch/live callbacks can resolve
 # config-only settings (e.g. matting.checkpoint) the same way the CLI does.
 _ACTIVE_CONFIG: dict = {}
+_BATCH_JOBS = BatchJobs()
 
 
 @dataclass
@@ -84,15 +91,17 @@ class BatchDemoResult:
     video_path: str | None
     artifact_path: str | None
     status: str
+    report_path: str | None = None
 
 
 def _timestamped_output_path(mode: str) -> Path:
-    ensure_dir(OUTPUT_DIR)
+    output_dir = Path(config_value(_ACTIVE_CONFIG, "paths.output_dir", OUTPUT_DIR))
+    ensure_dir(output_dir)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return OUTPUT_DIR / f"gradio_{timestamp}_{uuid4().hex[:12]}_{mode}.mp4"
+    return output_dir / f"gradio_{timestamp}_{uuid4().hex[:12]}_{mode}.mp4"
 
 
-def _zip_png_sequence(sequence_dir: str | Path) -> Path:
+def _zip_png_sequence(sequence_dir: str | Path, should_cancel=None) -> Path:
     source = Path(sequence_dir)
     if not source.is_dir():
         raise gr.Error(f"Transparent output directory was not created: {source}")
@@ -104,6 +113,8 @@ def _zip_png_sequence(sequence_dir: str | Path) -> Path:
     archive_path = source.with_suffix(".zip")
     with ZipFile(archive_path, "w", compression=ZIP_DEFLATED) as archive:
         for frame_path in frame_paths:
+            if should_cancel and should_cancel():
+                raise ProcessingCancelled("已停止透明帧打包。")
             archive.write(frame_path, arcname=frame_path.name)
     return archive_path
 
@@ -184,77 +195,121 @@ def _run_batch_demo(
     temporal_blend: float = 0.75,
     enable_depth: bool = False,
     depth_interval: int = 5,
+    preserve_audio: bool | None = None,
+    resize_short: int | None = None,
+    background_color: str | None = None,
+    progress=None,
+    should_cancel=None,
 ) -> BatchDemoResult:
     if not video_path:
         raise gr.Error("Please upload an input video first.")
     if mode == "image" and not background_path:
         raise gr.Error("Image background mode requires a background image.")
+    max_frames = 0 if max_frames is None else max_frames
+    if max_frames < 0 or int(max_frames) != max_frames:
+        raise gr.Error("处理帧数须为非负整数，0表示完整视频。")
+    max_frames = int(max_frames)
+    if resize_short is None:
+        resize_short = config_value(_ACTIVE_CONFIG, "input.resize_short")
+    elif resize_short == 0:
+        resize_short = None
+    if resize_short is not None:
+        if resize_short < 2 or int(resize_short) != resize_short:
+            raise gr.Error("输出短边须为不小于2的整数，0表示原始尺寸。")
+        resize_short = int(resize_short)
+    if preserve_audio is None:
+        preserve_audio = config_value(_ACTIVE_CONFIG, "render.preserve_audio", True)
+    background_color = background_color or config_value(_ACTIVE_CONFIG, "render.background_color", "#00FF00")
+    color_bgr = parse_background_color(background_color)
 
+    def check_cancelled():
+        if should_cancel and should_cancel():
+            raise ProcessingCancelled("已停止处理。")
+
+    def frame_progress(processed, total):
+        if progress is not None:
+            value = (processed, total) if total else None
+            progress(value, desc=f"正在处理：{processed} / {total or '?'} 帧")
+
+    check_cancelled()
     actual_device = resolve_device(device)
     output_path = _timestamped_output_path(mode)
+    final_directory = output_path.with_suffix("")
     checkpoint = (
         config_value(_ACTIVE_CONFIG, "matting.checkpoint")
         if model == config_value(_ACTIVE_CONFIG, "matting.model") else None
     )
     started_at = perf_counter()
+    if progress is not None:
+        progress(0, desc="正在准备模型，首次加载可能需要较长时间…")
     runner = create_matting_runner(model=model, checkpoint=checkpoint, device=actual_device,
         downsample_ratio=config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"))
-    stats = process_video(
-        input_path=video_path,
-        output_path=output_path,
-        runner=runner,
-        mode=mode,
-        max_frames=max_frames if max_frames > 0 else None,
-        background_path=background_path,
-        edge_feather=edge_feather,
-        mask_open=mask_open,
-        mask_close=mask_close,
-        temporal_smooth=temporal_smooth,
-        temporal_blend=temporal_blend,
-        enable_depth=enable_depth,
-        depth_interval=depth_interval,
-        device=actual_device,
-        resize_short=config_value(_ACTIVE_CONFIG, "input.resize_short"),
-        depth_model=config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
-        depth_near=config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
-        depth_mid=config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33),
-        background_color_bgr=parse_background_color(config_value(_ACTIVE_CONFIG, "render.background_color", "#00FF00")),
-    )
-    export_started = perf_counter()
-    if mode == "transparent":
-        archive_path = _zip_png_sequence(stats.output_path)
-        output_label = f"PNG frames: {stats.output_path}\nDownload: {archive_path}"
-        video_path_out = None
-        artifact_path = str(archive_path)
-    else:
-        try:
-            playable_output = export_video_for_delivery(stats.output_path, stats.output_path,
-                source_path=video_path,
-                preserve_audio=config_value(_ACTIVE_CONFIG, "render.preserve_audio", True))
-        except (ValueError, RuntimeError) as exc:
-            raise gr.Error(f"Video export failed: {exc}") from exc
-        stats = replace(stats, output_path=playable_output)
-        output_label = f"Output: {playable_output}"
-        video_path_out = str(playable_output)
-        artifact_path = None
+    check_cancelled()
+    with TemporaryDirectory(prefix=".batch-", dir=output_path.parent) as staging:
+        stats = process_video(
+            input_path=video_path,
+            output_path=Path(staging) / "processed.mp4",
+            runner=runner, mode=mode,
+            max_frames=max_frames if max_frames > 0 else None,
+            background_path=background_path,
+            edge_feather=edge_feather, mask_open=mask_open, mask_close=mask_close,
+            temporal_smooth=temporal_smooth, temporal_blend=temporal_blend,
+            enable_depth=enable_depth, depth_interval=depth_interval, device=actual_device,
+            resize_short=resize_short,
+            depth_model=config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
+            depth_near=config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
+            depth_mid=config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33),
+            background_color_bgr=color_bgr,
+            progress_callback=frame_progress, should_cancel=should_cancel,
+        )
+        export_started = perf_counter()
+        check_cancelled()
+        if progress is not None:
+            progress(None, desc="正在打包透明帧…" if mode == "transparent" else "正在导出视频与音频…")
+        if mode == "transparent":
+            archive_path = _zip_png_sequence(stats.output_path, should_cancel=should_cancel)
+            final_frames = final_directory / stats.output_path.name
+            final_archive = final_directory / archive_path.name
+            published_output = final_frames
+            output_label = f"PNG frames: {final_frames}\nDownload: {final_archive}"
+            video_path_out = None
+            artifact_path = str(final_archive)
+        else:
+            playable_output = export_video_for_delivery(stats.output_path, Path(staging) / "result.mp4",
+                source_path=video_path, preserve_audio=preserve_audio, should_cancel=should_cancel)
+            stats.output_path.unlink()
+            stats = replace(stats, output_path=playable_output)
+            published_output = final_directory / playable_output.name
+            output_label = f"Output: {published_output}"
+            video_path_out = str(published_output)
+            artifact_path = None
 
-    export_seconds = perf_counter() - export_started
-    total_seconds = perf_counter() - started_at
-    from cv_human_video_matting.reporting import write_run_report
-    report_path = write_run_report(output_path.with_suffix(".json"), video_path, stats, {
-        "model": model, "checkpoint": checkpoint, "device": actual_device, "mode": mode,
-        "max_frames": max_frames if max_frames > 0 else None, "background": background_path,
-        "edge_feather": edge_feather, "mask_open": mask_open, "mask_close": mask_close,
-        "temporal_smooth": temporal_smooth, "temporal_blend": temporal_blend,
-        "enable_depth": enable_depth, "depth_interval": depth_interval,
-        "downsample_ratio": config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"),
-        "resize_short": config_value(_ACTIVE_CONFIG, "input.resize_short"),
-        "depth_model": config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
-        "depth_near": config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
-        "depth_mid": config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33),
-        "background_color": config_value(_ACTIVE_CONFIG, "render.background_color", "#00FF00"),
-        "preserve_audio": config_value(_ACTIVE_CONFIG, "render.preserve_audio", True) and mode != "transparent",
-    }, total_seconds, export_seconds=export_seconds)
+        export_seconds = perf_counter() - export_started
+        total_seconds = perf_counter() - started_at
+        if progress is not None:
+            progress(None, desc="视频已处理完成，正在保存可追溯运行报告…")
+        from cv_human_video_matting.reporting import write_run_report
+        write_run_report(Path(staging) / "result.json", video_path, stats, {
+            "model": model, "checkpoint": checkpoint, "device": actual_device, "mode": mode,
+            "max_frames": max_frames if max_frames > 0 else None, "background": background_path,
+            "edge_feather": edge_feather, "mask_open": mask_open, "mask_close": mask_close,
+            "temporal_smooth": temporal_smooth, "temporal_blend": temporal_blend,
+            "enable_depth": enable_depth, "depth_interval": depth_interval,
+            "downsample_ratio": config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"),
+            "resize_short": resize_short,
+            "depth_model": config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
+            "depth_near": config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
+            "depth_mid": config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33),
+            "background_color": background_color,
+            "preserve_audio": preserve_audio and mode != "transparent",
+        }, total_seconds, export_seconds=export_seconds, published_output_path=published_output)
+        check_cancelled()
+        if final_directory.exists():
+            raise FileExistsError(f"Output directory already exists: {final_directory}")
+        # Publish media, PNG archive and report as one completed job directory.
+        Path(staging).rename(final_directory)
+        stats = replace(stats, output_path=published_output)
+        report_path = final_directory / "result.json"
 
     depth_label = f"Enabled (interval={depth_interval})" if enable_depth else "Disabled"
     depth_status = f"\nDepth Labeling: {depth_label}"
@@ -269,7 +324,10 @@ def _run_batch_demo(
         f"Run report: {report_path}"
         + depth_status
     )
-    return BatchDemoResult(video_path=video_path_out, artifact_path=artifact_path, status=status)
+    if progress is not None:
+        progress(1, desc="处理完成，结果及报告可下载。")
+    return BatchDemoResult(video_path=video_path_out, artifact_path=artifact_path,
+                           status=status, report_path=str(report_path))
 
 
 def run_demo(
@@ -319,27 +377,44 @@ def run_demo_for_ui(
     temporal_blend: float = 0.75,
     enable_depth: bool = False,
     depth_interval: int = 5,
+    preserve_audio: bool | None = None,
+    resize_short: int | None = None,
+    background_color: str | None = None,
+    progress=gr.Progress(),
+    request: gr.Request = gr.Request(),
 ):
-    result = _run_batch_demo(
-        video_path=video_path,
-        background_path=background_path,
-        model=model,
-        mode=mode,
-        max_frames=max_frames,
-        device=device,
-        edge_feather=edge_feather,
-        mask_open=mask_open,
-        mask_close=mask_close,
-        temporal_smooth=temporal_smooth,
-        temporal_blend=temporal_blend,
-        enable_depth=enable_depth,
-        depth_interval=depth_interval,
-    )
+    session_id = getattr(request, "session_hash", None) or uuid4().hex
+    try:
+        with _BATCH_JOBS.start(session_id) as token:
+            result = _run_batch_demo(
+                video_path=video_path, background_path=background_path,
+                model=model, mode=mode, max_frames=max_frames, device=device,
+                edge_feather=edge_feather, mask_open=mask_open, mask_close=mask_close,
+                temporal_smooth=temporal_smooth, temporal_blend=temporal_blend,
+                enable_depth=enable_depth, depth_interval=depth_interval,
+                preserve_audio=preserve_audio, resize_short=resize_short,
+                background_color=background_color, progress=progress,
+                should_cancel=token.is_set,
+            )
+    except ProcessingCancelled:
+        return gr.update(), gr.update(), "本次处理已停止，未发布新结果。", gr.update()
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise gr.Error(f"处理未完成：{exc}") from exc
     return (
         gr.update(value=result.video_path, visible=result.video_path is not None),
         gr.update(value=result.artifact_path, visible=result.artifact_path is not None),
         result.status,
+        gr.update(value=result.report_path, visible=result.report_path is not None),
     )
+
+
+def cancel_batch_for_ui(request: gr.Request = gr.Request()):
+    # A None default becomes Optional[Request] in Python 3.9/3.10 type hints;
+    # Gradio 4.37 only injects the session for the exact Request annotation.
+    session_id = getattr(request, "session_hash", None)
+    if session_id and _BATCH_JOBS.cancel(session_id):
+        return "已收到停止请求；正在完成当前帧或模型加载，并清理临时文件。"
+    return "当前会话没有正在处理的任务。排队中的任务开始后可停止。"
 
 
 def render_live_frame(
@@ -805,7 +880,7 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
     depth_interval_default = int(config_value(config, "depth.interval", 5))
 
     with gr.Blocks(
-        title="Human Video Matting",
+        title="人像视频抠像工作台",
         theme=gr.themes.Base(primary_hue="blue", neutral_hue="slate"),
         css=_build_css(),
     ) as demo:
@@ -816,62 +891,64 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                     <div class="brand-lockup">
                         <div class="brand-mark"></div>
                         <div>
-                            <h1 class="brand-title">Human Video Matting</h1>
-                            <div class="brand-subtitle">RVM + BiRefNet + Distance Labeling | Batch & Live Camera</div>
+                            <h1 class="brand-title">人像视频抠像工作台</h1>
+                            <div class="brand-subtitle">视频处理 · 背景替换 · 摄像头预览</div>
                         </div>
                     </div>
                     <div class="run-meta">
-                        <span class="meta-chip">CUDA ready</span>
-                        <span class="meta-chip">3 Models</span>
-                        <span class="meta-chip">7 Modes</span>
-                        <span class="meta-chip">⭐ Depth</span>
+                        <span class="meta-chip">本机处理</span>
+                        <span class="meta-chip">3种模型</span>
+                        <span class="meta-chip">7种输出模式</span>
+                        <span class="meta-chip">相对远近标注</span>
                     </div>
                 </header>
                 """
             )
 
             with gr.Tabs(elem_classes=["workspace-tabs"]):
-                with gr.Tab("Batch Render"):
+                with gr.Tab("视频处理"):
+                    gr.Markdown("上传视频 → 选择效果 → 开始处理。默认处理完整视频，结果与运行报告均可下载；透明PNG不含声音。")
                     with gr.Row(elem_classes=["workspace-row"]):
                         with gr.Column(scale=7, elem_classes=["media-column"]):
                             with gr.Group(elem_classes=["panel"]):
-                                gr.HTML(_panel_header("Source", "input video and background"))
+                                gr.HTML(_panel_header("输入素材", "视频和背景图片"))
                                 with gr.Row(elem_classes=["media-grid"]):
                                     video_input = gr.File(
-                                        label="Input Video File",
+                                        label="上传视频",
                                         file_types=["video"],
                                         type="filepath",
                                     )
                                     input_preview = gr.Video(
-                                        label="Input Preview",
+                                        label="原片预览",
                                         format="mp4",
                                         include_audio=True,
                                         height=280,
                                         interactive=False,
                                     )
                                     background_input = gr.Image(
-                                        label="Background Image",
+                                        label="背景图片（图片背景模式使用）",
                                         sources=["upload"],
                                         type="filepath",
                                     )
 
                             with gr.Row(elem_classes=["result-grid"]):
                                 with gr.Group(elem_classes=["panel"]):
-                                    gr.HTML(_panel_header("Output", "rendered result"))
+                                    gr.HTML(_panel_header("处理结果", "预览与下载"))
                                     output_video = gr.Video(
-                                        label="Output Video",
+                                        label="输出视频",
                                         format="mp4",
                                         include_audio=True,
                                         height=320,
                                     )
                                     output_file = gr.File(
-                                        label="Output Files",
+                                        label="下载透明帧压缩包",
                                         visible=False,
                                     )
+                                    report_file = gr.File(label="下载运行报告", visible=False)
                                 with gr.Group(elem_classes=["panel"]):
-                                    gr.HTML(_panel_header("Run Log", "frames and timing"))
+                                    gr.HTML(_panel_header("处理记录", "帧数与耗时"))
                                     status_output = gr.Textbox(
-                                        label="Status",
+                                        label="运行状态",
                                         lines=8,
                                         elem_classes=["status-box"],
                                         show_copy_button=True,
@@ -879,46 +956,54 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
 
                         with gr.Column(scale=4, elem_classes=["control-column"]):
                             with gr.Group(elem_classes=["control-panel"]):
-                                gr.HTML(_panel_header("Batch Controls", "offline render"))
+                                gr.HTML(_panel_header("处理设置", "选择模型与效果"))
                                 with gr.Column(elem_classes=["control-stack"]):
                                     model_input = gr.Dropdown(
-                                        label="Model",
-                                        choices=MODEL_VALUES,
+                                        label="抠像模型",
+                                        choices=MODEL_CHOICES,
                                         value=batch_model_default,
-                                        info="BiRefNet offers best edge quality but slower",
+                                        info="建议先用轻量RVM。其他模型需提前准备权重并验证效果。",
                                     )
                                     device_input = gr.Dropdown(
-                                        label="Device",
+                                        label="处理设备",
                                         choices=["auto", "cpu", "cuda"],
                                         value=device_default,
                                     )
                                     mode_input = gr.Dropdown(
-                                        label="Mode",
-                                        choices=BATCH_MODE_CHOICES,
+                                        label="输出效果",
+                                        choices=[(MODE_LABELS[value], value) for value in BATCH_MODE_CHOICES],
                                         value=batch_mode_default,
-                                        info="blur=background bokeh, transparent=BGRA PNG",
+                                        info="对比模式便于观察原片与抠像结果。",
                                     )
-                                    max_frames_input = gr.Slider(
-                                        label="Max Frames",
+                                    max_frames_input = gr.Number(
+                                        label="处理帧数上限",
                                         minimum=0,
-                                        maximum=300,
-                                        value=120,
-                                        step=1,
-                                        info="0 means whole video.",
+                                        value=0,
+                                        precision=0,
+                                        info="0表示完整视频；调试时可填120等较小值。",
                                     )
-                                    with gr.Accordion("⭐ Distance Labeling (NEW)", open=True):
+                                    with gr.Accordion("导出设置", open=True):
+                                        preserve_audio_input = gr.Checkbox(label="保留原视频声音",
+                                            value=config_value(config, "render.preserve_audio", True))
+                                        resize_short_input = gr.Number(label="输出短边上限（像素）",
+                                            minimum=0, precision=0,
+                                            value=config_value(config, "input.resize_short") or 0,
+                                            info="0保留原尺寸；只缩小，不放大。")
+                                        background_color_input = gr.ColorPicker(label="纯色背景颜色",
+                                            value=config_value(config, "render.background_color", "#00FF00"))
+                                    with gr.Accordion("相对远近标注", open=False):
                                         enable_depth_input = gr.Checkbox(
-                                            label="Enable Distance Labeling",
+                                            label="启用相对远近标注",
                                             value=enable_depth_default,
-                                            info="Show Near/Mid/Far distance labels on person",
+                                            info="Near/Mid/Far是相对远近，不表示实际米数；开启会增加处理时间。",
                                         )
                                         depth_interval_input = gr.Slider(
-                                            label="Depth Interval",
+                                            label="深度更新间隔（帧）",
                                             minimum=1,
                                             maximum=30,
                                             value=depth_interval_default,
                                             step=1,
-                                            info="Estimate depth every N frames",
+                                            info="每隔这些帧重新估计一次深度。",
                                         )
                                     with gr.Accordion("Alpha Controls", open=True):
                                         edge_feather_input = gr.Slider(
@@ -955,12 +1040,13 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                             step=0.05,
                                         )
                                     run_button = gr.Button(
-                                        "Run Batch Matting",
+                                        "开始处理",
                                         variant="primary",
                                         elem_classes=["primary-action"],
                                     )
+                                    cancel_button = gr.Button("停止当前处理", variant="secondary")
 
-                with gr.Tab("Live Camera"):
+                with gr.Tab("摄像头预览"):
                     with gr.Row(elem_classes=["workspace-row"]):
                         with gr.Column(scale=7, elem_classes=["media-column"]):
                             with gr.Group(elem_classes=["panel"]):
@@ -982,9 +1068,8 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                     )
                                 gr.HTML(
                                     "<div class=\"live-hint\">👉 点击摄像头下方的红色 ● 按钮开始实时抠图。"
-                                    "首帧需加载模型（约 10 秒），之后实时更新。"
-                                    "<br/>👉 Click the red ● button under the camera to start. "
-                                    "The first frame loads the model (~10s), then streams live.</div>"
+                                    "首帧需加载模型，等待时间取决于环境。"
+                                    "请先允许浏览器访问摄像头；视频批处理期间，预览请求会排队。</div>"
                                 )
                             with gr.Group(elem_classes=["panel"]):
                                 gr.HTML(_panel_header("Live Status", "current frame timing"))
@@ -1090,9 +1175,18 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                     temporal_blend_input,
                     enable_depth_input,
                     depth_interval_input,
+                    preserve_audio_input,
+                    resize_short_input,
+                    background_color_input,
                 ],
-                outputs=[output_video, output_file, status_output],
+                outputs=[output_video, output_file, status_output, report_file],
+                api_name="process_video",
+                concurrency_id="inference",
+                concurrency_limit=1,
             )
+
+            cancel_button.click(fn=cancel_batch_for_ui, inputs=None, outputs=[status_output],
+                                queue=False, api_name="stop_processing")
 
             live_camera.stream(
                 fn=render_live_frame_for_ui,
@@ -1114,6 +1208,7 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                 ],
                 outputs=[live_output, live_status, live_session],
                 trigger_mode="always_last",
+                concurrency_id="inference",
                 concurrency_limit=1,
             )
 

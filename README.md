@@ -4,6 +4,8 @@
 
 当前处于答辩候选版本准备阶段。工程测试、真实模型运行和真人素材效果评估分别记录，不以短片冒烟测试推导持续实时性能。
 
+当前候选版本为 **0.2.0rc1**：新增逐帧进度、按浏览器会话停止处理、可下载的版本/文件校验报告、中文评测汇总，以及可校验的自动打包工具。
+
 ## 快速开始
 
 以下命令在仓库根目录运行，建议Python 3.10。已有可用环境先运行检查，无须重新安装：
@@ -32,7 +34,7 @@ python scripts/download_models.py --models rvm_mobilenetv3
 python -B app.py ui --host 127.0.0.1 --port 7860 --no-share
 ```
 
-打开本机 `http://127.0.0.1:7860`。Batch Render上传视频、选择背景模式，输出MP4或透明PNG压缩包。Live Camera需允许浏览器使用摄像头；速度取决于硬件、分辨率和模型。
+打开本机 `http://127.0.0.1:7860`。“视频处理”上传视频、选择背景模式，默认处理全部帧；可设置输出短边、颜色、是否保留声音。“停止当前处理”会停止本会话正在处理的任务；模型加载或单帧推理需等待当前步骤返回。“摄像头预览”需允许浏览器使用摄像头，速度取决于硬件、分辨率和模型。
 
 ## 功能与配置
 
@@ -41,11 +43,13 @@ python -B app.py ui --host 127.0.0.1 --port 7860 --no-share
 | 七种渲染模式 | green纯色、image图片、blur虚化、alpha遮罩、foreground黑底前景、side_by_side对比、transparent透明PNG |
 | 视频交付 | H.264/yuv420p MP4，保留原视频首条音轨并转AAC；无音轨视频正常处理 |
 | 截取与声音 | --max-frames限制帧数，音频随输出时长截断；--no-preserve-audio去掉声音 |
-| 失败保护 | CLI先处理临时文件，成功导出后替换最终MP4；禁止覆盖输入 |
+| 失败保护 | CLI临时视频成功导出后替换MP4；网页将媒体与报告整体保存到独立任务目录，失败或停止时清理本次暂存文件 |
 | 后处理 | 边缘羽化、形态学开闭、时间平滑；过强平滑可能拖影 |
 | 相对距离 | MiDaS，可配置模型、阈值和刷新间隔；Near/Mid/Far不是米数 |
 | 环境检查 | doctor检查依赖、设备、FFmpeg编码器和缓存，不下载模型 |
-| 运行记录 | CLI使用--report，网页批处理自动保存同名JSON，记录配置及处理/导出耗时 |
+| 运行记录 | CLI使用--report；网页可下载result.json，记录版本、源码/文件SHA256、实际输出尺寸及处理/导出耗时 |
+
+网页任务存放在 `data/output/gradio_时间_标识_模式/`，视频为 `result.mp4`，报告为 `result.json`；透明模式包含帧目录与ZIP。`paths.output_dir`可更改保存位置。网页推理任务依次运行以减少显存争用；停止按钮针对已开始的当前任务，排队任务暂不能撤回。
 
 默认配置为 `configs/default.yaml`。额外配置使用 `python app.py --config 文件路径 matte ...`。布尔值写YAML的true/false，颜色写带引号的HEX字符串。显式指定不存在的RVM检查点会报错，未指定时使用预训练缓存。
 
@@ -74,10 +78,26 @@ python -B app.py matte --input data/input/demo.mp4 --output data/output/small.mp
 
 ## 测试与交付资料
 
+同一素材和参数至少运行三次，分别保存报告后生成可离线打开的中文汇总页：
+
+```bash
+python -B app.py summarize --reports "data/output/benchmark/run-*.json" --output data/output/benchmark/summary.html
+```
+
+汇总按报告记录的输入哈希、代码版本、设备、参数和处理帧数分组，展示中位数与范围；旧版或信息不足的报告单独列出。默认缓存权重仍需团队固定并另行核验，汇总不产生画质评分。
+
 ```bash
 python -m pip install -r requirements-dev.txt
 python -B -m pytest -q --cov=cv_human_video_matting --cov-report=term --cov-report=xml --cov-fail-under=70
 ```
+
+在代码已提交且无已跟踪文件修改时，生成本地候选包：
+
+```bash
+python scripts/package_release.py --output-dir ../deliverables/v0.2.0rc1 --evidence data/output/benchmark --evidence coverage.xml
+```
+
+目标目录必须尚不存在。工具从Git提交打包源码，附明确指定的证据、可恢复的Git历史、SHA256清单与使用说明；不会自动收录未跟踪文件、模型权重或整个运行环境。候选包不等于远端正式Release。
 
 离线测试使用模型替身与本地合成音视频，不下载权重。GitHub Actions仅在对应平台触发，Gitee托管不代表此工作流已运行。
 

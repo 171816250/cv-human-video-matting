@@ -7,12 +7,26 @@ from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 from tempfile import TemporaryDirectory
+import sys
 
 
 def create_matting_runner(**kwargs):
     """Load inference dependencies only when an inference command needs them."""
     from cv_human_video_matting.matting.factory import create_matting_runner as create
     return create(**kwargs)
+
+
+class ConsoleProgress:
+    """Bound terminal output to one update per second plus the first/final frame."""
+    def __init__(self):
+        self._last_update = 0.0
+
+    def __call__(self, processed: int, total: int | None):
+        now = perf_counter()
+        if processed == 0 or processed == total or now - self._last_update >= 1:
+            suffix = str(total) if total is not None else "?"
+            print(f"Processing frames: {processed}/{suffix}", file=sys.stderr, flush=True)
+            self._last_update = now
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command")
+    summary_parser = subparsers.add_parser("summarize", help="Summarize comparable run reports.")
+    summary_parser.add_argument("--reports", nargs="+", required=True, help="Run JSON paths or glob patterns.")
+    summary_parser.add_argument("--output", required=True, help="Summary .html or .json path.")
     doctor_parser = subparsers.add_parser("doctor", help="Check local readiness without downloads.")
     doctor_parser.add_argument("--report", help="Save environment checks as JSON.")
 
@@ -46,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     matte_parser = subparsers.add_parser("matte", help="Run video matting on an input video.")
     matte_parser.add_argument("--input", required=True, help="Input video path.")
     matte_parser.add_argument("--report", help="Optional JSON performance report path.")
+    matte_parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True,
+                              help="Show periodic frame progress on stderr (default: on).")
     matte_parser.add_argument("--resize-short", type=int, help="Limit the shorter side; no upscaling.")
     matte_parser.add_argument("--background-color", help="Solid background color, e.g. '#336699'.")
     matte_parser.add_argument("--preserve-audio", action=argparse.BooleanOptionalAction,
@@ -162,6 +181,18 @@ def main(argv: list[str] | None = None) -> None:
         if not report["ready"]:
             raise SystemExit(1)
         return
+    if args.command == "summarize":
+        from glob import glob
+        from cv_human_video_matting.evaluation import write_evaluation_summary
+        paths = []
+        for value in args.reports:
+            matches = sorted(glob(value))
+            if not matches:
+                parser.error(f"No report matched: {value}")
+            paths.extend(matches)
+        paths = list(dict.fromkeys(paths))
+        print(f"Evaluation summary: {write_evaluation_summary(paths, args.output)}")
+        return
     from cv_human_video_matting.io.video import copy_video, probe_video, export_video_for_delivery
     from cv_human_video_matting.pipeline import process_video
     from cv_human_video_matting.utils.config import (
@@ -275,6 +306,7 @@ def main(argv: list[str] | None = None) -> None:
                 depth_near=depth_near,
                 depth_mid=depth_mid,
                 background_color_bgr=color_bgr,
+                progress_callback=ConsoleProgress() if args.progress else None,
             )
             export_started = perf_counter()
             if mode != "transparent":

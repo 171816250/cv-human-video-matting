@@ -140,10 +140,18 @@ def test_export_failure_preserves_existing_output_and_removes_temporary(
             raise subprocess.SubprocessError("FFmpeg launch interrupted")
         if failure == "nonzero":
             Path(command[-1]).write_bytes(b"partial conversion")
-            return subprocess.CompletedProcess(command, 1, b"", b"encoder failed")
-        return subprocess.CompletedProcess(command, 0, b"", b"")
+            kwargs["stderr"].write(b"encoder failed")
 
-    monkeypatch.setattr(video.subprocess, "run", fail)
+        class FinishedProcess:
+            def wait(self, timeout=None):
+                return 1 if failure == "nonzero" else 0
+
+            def poll(self):
+                return self.wait()
+
+        return FinishedProcess()
+
+    monkeypatch.setattr(video.subprocess, "Popen", fail)
     with pytest.raises(RuntimeError):
         video.export_video_for_delivery(processed, output)
 

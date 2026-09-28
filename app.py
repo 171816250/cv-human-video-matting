@@ -22,4 +22,8 @@ from cv_human_video_matting.cli import main  # noqa: E402
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Processing interrupted; temporary resources have been released.", file=sys.stderr)
+        raise SystemExit(130)

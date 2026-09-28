@@ -14,6 +14,9 @@ from typing import Callable
 import cv2
 
 from cv_human_video_matting.utils.paths import ensure_parent_dir
+from cv_human_video_matting.utils.progress import (
+    CancelCallback, ProcessingCancelled, check_cancelled,
+)
 
 
 @dataclass(frozen=True)
@@ -140,11 +143,63 @@ def _temporary_mp4(target: Path) -> Path:
     return Path(name)
 
 
+def _reap_encoder(process: subprocess.Popen) -> None:
+    """Terminate unfinished encoders and always collect their exit status."""
+    if process.poll() is None:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+    else:
+        process.wait()
+
+
+def _run_encoder(command: list[str], should_cancel: CancelCallback | None) -> None:
+    # A file-backed stderr sink cannot fill a PIPE and deadlock while the main
+    # thread polls for cancellation. Only the tail is read for error reporting.
+    with tempfile.TemporaryFile(mode="w+b") as error_log:
+        process = None
+        try:
+            check_cancelled(should_cancel)
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=error_log,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            while True:
+                check_cancelled(should_cancel)
+                try:
+                    return_code = process.wait(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            check_cancelled(should_cancel)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"Could not run FFmpeg for video export: {exc}") from exc
+        finally:
+            # This also runs for KeyboardInterrupt and callback exceptions.
+            if process is not None:
+                _reap_encoder(process)
+        if return_code != 0:
+            error_log.seek(0, os.SEEK_END)
+            error_log.seek(max(0, error_log.tell() - 2000))
+            detail = error_log.read().decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"FFmpeg video export failed: {detail}")
+
+
 def export_video_for_delivery(
     processed_path: str | Path,
     output_path: str | Path,
     source_path: str | Path | None = None,
     preserve_audio: bool = True,
+    should_cancel: CancelCallback | None = None,
 ) -> Path:
     """Atomically export H.264/AAC MP4, keeping audio within the processed duration.
 
@@ -153,8 +208,10 @@ def export_video_for_delivery(
     Odd video dimensions are padded by at most one pixel for yuv420p support.
     The processed file may be replaced in place, but an explicitly supplied
     original source can never be used as the output. Conversion failures raise
-    an error and leave any existing output untouched.
+    an error and leave any existing output untouched. Cancellation terminates
+    and reaps FFmpeg before raising ProcessingCancelled.
     """
+    check_cancelled(should_cancel)
     processed = Path(processed_path)
     output = Path(output_path)
     original = Path(source_path) if source_path is not None else None
@@ -214,23 +271,12 @@ def export_video_for_delivery(
         str(temporary),
     ])
     try:
-        try:
-            completed = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise RuntimeError(f"Could not run FFmpeg for video export: {exc}") from exc
-        if completed.returncode != 0:
-            detail = completed.stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"FFmpeg video export failed: {detail[-2000:]}")
+        _run_encoder(command, should_cancel)
         try:
             _checked_video(temporary)
         except (OSError, ValueError) as exc:
             raise RuntimeError("FFmpeg did not produce a valid, nonempty video.") from exc
+        check_cancelled(should_cancel)
         temporary.replace(output)
         return output
     finally:
@@ -276,6 +322,8 @@ def ensure_browser_playable_video(
         _checked_video(temporary)
         temporary.replace(target)
         return target
+    except ProcessingCancelled:
+        raise
     except Exception as exc:
         if strict:
             raise RuntimeError(f"Could not create a browser-compatible video: {exc}") from exc

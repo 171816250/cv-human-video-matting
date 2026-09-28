@@ -17,6 +17,8 @@
 
 视频接口新增 `resize_short=None`（原尺寸）、`depth_model`、`depth_near`、`depth_mid`、`background_color_bgr`。颜色同样适用于单帧接口，在green/side_by_side生效；`parse_background_color('#RRGGBB')` 返回BGR元组。
 
+`process_video(..., progress_callback=None, should_cancel=None)` 的进度回调接收 `(processed_frames, total_frames)`，总数不可靠时为None。取消回调无参数，返回true时抛出 `utils.progress.ProcessingCancelled`。透明序列通过独立暂存目录生成，失败清理本任务文件；已有帧仍拒绝覆盖。`export_video_for_delivery(..., should_cancel=None)`同样支持取消，并回收编码子进程。
+
 ## 深度与状态
 
 `DepthEstimator.person_distance(depth, alpha)` 返回相对距离值和标签，兼容两种alpha表示；无足够有效人物像素时返回空距离。
@@ -25,6 +27,8 @@
 
 ## 性能报告
 
-`write_run_report(path, input_path, stats, options, total_seconds, export_seconds=0)` 保存JSON运行记录（schema_version=2）。计时口径详见EVALUATION.md。
+`write_run_report(path, input_path, stats, options, total_seconds, export_seconds=0, published_output_path=None)` 保存schema3运行记录。可选发布路径只改变报告中展示的输出路径，哈希和媒体检查仍读取stats.output_path暂存文件，供事务式发布使用；调用方必须在报告成功后发布对应产物。计时口径详见EVALUATION.md。
+
+`evaluation.summarize_reports(paths)`返回分组统计，`write_evaluation_summary(paths, output_path)`保存自包含HTML或JSON。汇总只读取传入的运行报告，不访问其中引用的媒体路径，也不计算未测量的画质指标。
 
 `check_environment(config_path)` 返回本地诊断，不下载模型。ready只表示未发现阻断项，不代表画质与速度验收通过。

@@ -19,8 +19,20 @@ RVM的 `--downsample-ratio auto` 使用 `min(1, 512 / 输入长边)` 作为内�
 - `elapsed_seconds` / `fps`：视频处理流程，包括首帧、视频读写、深度模型初始化和资源释放；不包含抠像模型加载。
 - `total_seconds` / `total_fps`：模型加载加完整处理及交付导出，不包含报告生成。
 - `export_seconds`：H.264转码/音频合并，或网页透明序列打包的耗时。
+- schema3的 `metadata_seconds`：额外版本识别、文件哈希与媒体信息采集时间，不包含在total_seconds中，也不包含JSON序列化与落盘。
 
 这两个速度均不是纯模型推理FPS。CLI与网页的总耗时均包含交付转换。首次下载会影响总耗时，正式评测需提前准备权重，每组至少重复3次并报告中位数与波动。历史schema_version=1未计入导出，不能直接比较。
+
+## 报告追溯与汇总
+
+schema3记录软件版本、Git提交与工作区状态、源码SHA256、输入/输出文件校验值、输出实际尺寸/帧率/帧数。透明PNG记录逐帧校验清单；帧序列时长按输入帧率解释。自定义背景与显式检查点另记录哈希。默认模型缓存/上游权重未自动核验，正式评测仍须固定并核验权重及机器负载。
+
+```bash
+python -B app.py summarize --reports "data/output/benchmark/run-*.json" --output data/output/benchmark/summary.html
+python -B app.py summarize --reports "data/output/benchmark/run-*.json" --output data/output/benchmark/summary.json
+```
+
+汇总按已记录条件分组，输出运行次数、处理和总FPS的中位数、最小值与最大值。不同分辨率、帧数、设备、代码或参数不混合。schema1/2及缺少追溯字段的报告只展示待核信息；坏JSON和自相矛盾的FPS会明确报错。报告路径支持通配符，但不要把环境诊断JSON或已生成的汇总JSON混入运行报告输入。
 
 ## 质量和教学案例
 
