@@ -181,6 +181,30 @@ def test_repeated_package_has_identical_content(tiny_repo, tmp_path):
         assert (first / name).read_bytes() == (second / name).read_bytes()
 
 
+def test_archive_keeps_committed_blob_bytes_under_windows_line_ending_settings(tiny_repo, tmp_path):
+    git(tiny_repo, "config", "core.autocrlf", "true")
+    git(tiny_repo, "config", "core.eol", "crlf")
+    source = tiny_repo / "src" / "example.py"
+    source.parent.mkdir()
+    source.write_bytes(b'def sample():\n    return "committed LF source"\n')
+    git(tiny_repo, "add", "src/example.py")
+    git(tiny_repo, "commit", "-m", "add source with LF blob")
+    committed = subprocess.run(
+        ["git", "-C", str(tiny_repo), "show", "HEAD:src/example.py"],
+        capture_output=True, check=True,
+    ).stdout
+    assert b"\n" in committed and b"\r\n" not in committed
+
+    output = release.package_release(tiny_repo, tmp_path / "package")
+
+    with ZipFile(output / "candidate.zip") as archive:
+        assert archive.read("source/src/example.py") == committed
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["zip_entries"]["source/src/example.py"]["sha256"] == hashlib.sha256(committed).hexdigest()
+    assert git(tiny_repo, "config", "core.autocrlf") == "true"
+    assert git(tiny_repo, "config", "core.eol") == "crlf"
+
+
 def test_git_trust_is_command_scoped_and_timeout_is_friendly(tmp_path, monkeypatch):
     calls = []
 

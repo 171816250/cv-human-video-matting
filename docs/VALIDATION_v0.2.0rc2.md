@@ -2,13 +2,15 @@
 
 ## 自动化回归
 
-本机Python 3.9.12、Windows环境，完整回归结果为 **497 passed、1 skipped、27 warnings**；核心包语句覆盖率 **89.29%（2152/2410）**。跳过项是Windows缺少创建符号链接的权限；警告来自Gradio/FastAPI生命周期及异步接口弃用提示。覆盖率反映工程路径覆盖，不代表模型效果达标。
+本机Python 3.9.12、Windows环境，完整回归结果为 **498 passed、1 skipped、27 warnings**；核心包语句覆盖率 **89.29%（2152/2410）**。跳过项是Windows缺少创建符号链接的权限；警告来自Gradio/FastAPI生命周期及异步接口弃用提示。覆盖率反映工程路径覆盖，不代表模型效果达标。
 
 ```powershell
 python -B -m pytest -q --cov=cv_human_video_matting --cov-report=term --cov-report=xml --cov-fail-under=70
 ```
 
 验证覆盖模型包内容/路径校验、EMA兼容及adaptive运动/静态噪声实验、设备错误、参数提前拒绝、已知帧数提前EOF、未知源帧数带音频完整链路、编码静默丢帧、视频/报告失败回滚、透明帧备注保护、路径覆盖保护及既有功能。真实localhost网页接口验证了跨会话停止隔离、停止后再次处理、18项页面参数和结果/报告下载。
+
+打包验证补充Windows自动换行转换回归：归档使用固定LF规则，ZIP源码字节与Git提交一致。最终包的全部核心Python源码聚合SHA256与5份实机运行报告逐项核对一致；模型包内每个源码及权重文件也核对哈希。
 
 ## 本地实机与合成实验
 

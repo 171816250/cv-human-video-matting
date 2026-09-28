@@ -268,7 +268,11 @@ def package_release(repo: Path, output_dir: Path, evidence: list[Path] | None = 
         archive_path = staging / "candidate.zip"
         bundle_path = staging / "repository.bundle"
         guide_path = staging / "START_HERE.md"
-        _git(repo, "archive", "--format=zip", "--prefix=source/", f"--output={archive_path}", commit)
+        # Archive committed source bytes without the host's checkout line-ending
+        # conversion. Scope these settings to this call: changing status/config
+        # semantics could otherwise hide real working-tree changes.
+        _git(repo, "-c", "core.autocrlf=false", "-c", "core.eol=lf",
+             "archive", "--format=zip", "--prefix=source/", f"--output={archive_path}", commit)
         expected = _verify_zip(archive_path)
         if any(not name.startswith("source/") for name in expected):
             raise PackagingError("Git archive contains a path outside source/.")
