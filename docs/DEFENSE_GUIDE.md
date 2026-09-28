@@ -4,9 +4,13 @@
 
 ## 上场前准备
 
+0.2.0rc3 已提供项目 `.venv` 与 `Start-Demo.cmd` 入口。新机器先按[安装说明](INSTALLATION.md)准备环境和离线包；已有环境双击入口，检查通过后访问本地地址。离线界面不提供额外模型或深度下载；摄像头仍需浏览器授权和现场实测。本机 CPU 验收范围见[本版记录](VALIDATION_v0.2.0rc3.md)。
+
+下文以 Windows PowerShell 为例，在仓库根目录运行，始终使用项目 `.venv`，无须激活。macOS/Linux 将 `.\.venv\Scripts\python.exe` 替换为 `.venv/bin/python`。模型包路径以 `weights/offline-rvm-mobilenetv3-rc2` 为例，交付位置不同须替换；启动器使用的临时配置不会自动影响之后单独执行的 CLI 命令。
+
 1. 确认所用代码版本，记录 `git rev-parse HEAD`。保留可恢复的源码备份，演示期间固定环境与参数。
-2. 在仓库根目录运行 `python -B app.py doctor --report data/output/environment.json`。FAIL需修复，WARN需结合提示完成试运行；PASS不是画质验收。
-3. 提前下载RVM权重，运行一次实际素材，确认缓存可用。模型缓存通常不在源码目录中，换电脑必须另外准备。深度或BiRefNet首次运行可能需要额外资源，不要在现场首次启用。
+2. 在仓库根目录运行 `.\.venv\Scripts\python.exe -B app.py doctor --report data/output/environment.json`。FAIL需修复，WARN需结合提示完成试运行；PASS不是画质验收。`Start-Demo.cmd` 还会检查实际选定的离线模型包。
+3. 提前准备并校验RVM离线模型包，运行一次实际素材；换电脑同时携带模型包和依赖准备说明。首次下载与模型包导出在联网准备阶段完成，具体见[安装说明](INSTALLATION.md)和[离线模型说明](OFFLINE_MODEL.md)。深度或BiRefNet首次运行可能需要额外资源，不要在现场首次启用。
 4. 至少准备三组经授权的真人短片：清晰单人、复杂背景、运动人物。每组保留原片、参数、输出、JSON、典型失败截图。不要用合成人形冒烟片替代真实效果证据。
 5. 在实际答辩机器、浏览器和投影环境上测试视频播放、声音、摄像头权限、导出和下载。准备一份已生成结果作为演示备用。
 
@@ -23,21 +27,25 @@
 
 ## 可复制命令
 
-```bash
-# 准备、检查与启动
-python scripts/download_models.py --models rvm_mobilenetv3
-python -B app.py doctor --report data/output/environment.json
-python -B app.py ui --host 127.0.0.1 --port 7860 --no-share
+```powershell
+# 工程验收：提前准备模型包后，生成合成片并自动验证网页链路
+.\.venv\Scripts\python.exe scripts/create_smoke_video.py
+.\.venv\Scripts\python.exe -B scripts/verify_local_demo.py --bundle weights/offline-rvm-mobilenetv3-rc2 --input data/input/smoke_demo.mp4 --output-dir data/output/defense-web-rehearsal --device cpu --max-frames 8
 
-# 正式素材运行；demo.mp4由团队准备
-python -B app.py matte --model rvm_mobilenetv3 --device auto --input data/input/demo.mp4 --output data/output/demo-compare.mp4 --mode side_by_side --max-frames 300 --report data/output/demo-compare.json
+# 离线网页启动；保持终端开启，后续命令在另一终端运行
+.\.venv\Scripts\python.exe -B app.py ui --model-bundle weights/offline-rvm-mobilenetv3-rc2 --host 127.0.0.1 --port 7860 --no-share
+
+# 正式素材运行；demo.mp4须团队另行准备经授权的真人原片
+.\.venv\Scripts\python.exe -B app.py matte --model rvm_mobilenetv3 --model-bundle weights/offline-rvm-mobilenetv3-rc2 --device auto --input data/input/demo.mp4 --output data/output/demo-compare.mp4 --mode side_by_side --max-frames 300 --report data/output/demo-compare.json
 
 # 透明输出到demo-alpha_frames；再次运行换输出名
-python -B app.py matte --input data/input/demo.mp4 --output data/output/demo-alpha.mp4 --mode transparent --max-frames 60 --report data/output/demo-alpha.json
+.\.venv\Scripts\python.exe -B app.py matte --model-bundle weights/offline-rvm-mobilenetv3-rc2 --input data/input/demo.mp4 --output data/output/demo-alpha.mp4 --mode transparent --max-frames 60 --report data/output/demo-alpha.json
 
-# 自动化回归；不下载模型
-python -B -m pytest -q --cov=cv_human_video_matting --cov-report=term --cov-report=xml --cov-fail-under=70
+# 自动化回归；提前按安装说明安装开发依赖，不下载模型
+.\.venv\Scripts\python.exe -B -m pytest -q --cov=cv_human_video_matting --cov-report=term --cov-report=xml --cov-fail-under=70
 ```
+
+工程验收目录必须是新目录，重复运行须换名。`smoke_demo.mp4` 仅验证流程；`demo.mp4` 不随源码提供，真人质量验收仍需原片来源与使用授权、同帧对比和失败记录。
 
 网页批处理保存result.json并提供下载，状态栏显示路径。CLI报告路径必须以.json结尾，不能与输入或输出相同。总耗时含模型加载、处理和交付导出；短片单次FPS不能代表长视频或所有设备性能。
 

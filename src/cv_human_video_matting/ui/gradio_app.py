@@ -127,6 +127,26 @@ def _choice_default(value: object, choices: list[str], fallback: str) -> str:
     return str(value) if value in choices else fallback
 
 
+def _canonical_model(model):
+    return {"rvm": "rvm_mobilenetv3", "mobilenetv3": "rvm_mobilenetv3",
+            "resnet50": "rvm_resnet50", "ultra": "birefnet"}.get(model, model)
+
+
+def _model_assets(model, enable_depth=False):
+    """Keep requests in offline bundle mode from switching to network backends."""
+    configured = _canonical_model(config_value(_ACTIVE_CONFIG, "matting.model", "rvm_mobilenetv3"))
+    bundle = config_value(_ACTIVE_CONFIG, "matting.bundle")
+    selected = _canonical_model(model)
+    if bundle:
+        if selected not in {configured, "dummy"}:
+            raise ValueError("离线模型包模式已固定模型；切换模型需准备对应模型包并重新启动。")
+        if enable_depth:
+            raise ValueError("离线RVM模型包不包含远近标注模型，请关闭相对远近标注。")
+    if selected == configured:
+        return config_value(_ACTIVE_CONFIG, "matting.checkpoint"), bundle
+    return None, None
+
+
 def _resize_rgb_for_live(frame_rgb: np.ndarray, max_width: int) -> np.ndarray:
     if max_width <= 0 or frame_rgb.shape[1] <= max_width:
         return frame_rgb
@@ -147,11 +167,7 @@ def _live_cache_for(
     cache = cache if cache is not None else _LIVE_CACHE
     temporal_mode, temporal_motion_threshold = _temporal_settings(
         temporal_mode, temporal_motion_threshold)
-    configured_model = config_value(_ACTIVE_CONFIG, "matting.model")
-    checkpoint = (config_value(_ACTIVE_CONFIG, "matting.checkpoint")
-                  if model == configured_model else None)
-    bundle_path = (config_value(_ACTIVE_CONFIG, "matting.bundle")
-                   if model == configured_model else None)
+    checkpoint, bundle_path = _model_assets(model)
     ratio = config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto")
     key = (model, device, checkpoint, bundle_path, ratio, bool(temporal_smooth),
            float(temporal_blend), temporal_mode, temporal_motion_threshold,
@@ -260,12 +276,7 @@ def _run_batch_demo(
     actual_device = resolve_device(device)
     output_path = _timestamped_output_path(mode)
     final_directory = output_path.with_suffix("")
-    checkpoint = (
-        config_value(_ACTIVE_CONFIG, "matting.checkpoint")
-        if model == config_value(_ACTIVE_CONFIG, "matting.model") else None
-    )
-    bundle_path = (config_value(_ACTIVE_CONFIG, "matting.bundle")
-                   if model == config_value(_ACTIVE_CONFIG, "matting.model") else None)
+    checkpoint, bundle_path = _model_assets(model, enable_depth=enable_depth)
     from cv_human_video_matting.reporting import validate_artifact_paths
     validate_artifact_paths(final_directory / "result.json", video_path, final_directory,
                             asset_paths=(background_path, checkpoint, bundle_path))
@@ -487,6 +498,7 @@ def render_live_frame(
     if mode == "image" and not background_path:
         return None, "Image mode needs a background image."
 
+    _model_assets(model, enable_depth=enable_depth)
     actual_device = resolve_device(device)
     frame_rgb = _resize_rgb_for_live(frame_rgb, int(max_live_width))
     frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
@@ -900,14 +912,21 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
     # (e.g. matting.checkpoint) the same way the CLI does.
     global _ACTIVE_CONFIG
     _ACTIVE_CONFIG = config
+    configured_model = _canonical_model(config_value(config, "matting.model", "rvm_mobilenetv3"))
+    offline_bundle = bool(config_value(config, "matting.bundle"))
+    batch_models = ([choice for choice in MODEL_CHOICES if choice[1] == configured_model]
+                    if offline_bundle else MODEL_CHOICES)
+    live_models = [configured_model] if offline_bundle else ["dummy", "rvm_mobilenetv3"]
+    if offline_bundle and configured_model not in {"rvm_mobilenetv3", "rvm_resnet50"}:
+        raise ValueError("离线模型包仅支持RVM，请选择对应的RVM模型。")
     batch_model_default = _choice_default(
-        config_value(config, "matting.model", "rvm_mobilenetv3"),
+        configured_model,
         MODEL_VALUES,
         "rvm_mobilenetv3",
     )
     live_model_default = _choice_default(
-        config_value(config, "matting.model", "rvm_mobilenetv3"),
-        ["dummy", "rvm_mobilenetv3"],
+        configured_model,
+        live_models,
         "rvm_mobilenetv3",
     )
     device_default = _choice_default(
@@ -934,11 +953,12 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
     temporal_blend_default = float(config_value(config, "postprocess.temporal_alpha", 0.75))
     temporal_mode_default = config_value(config, "postprocess.temporal_mode", "ema")
     temporal_threshold_default = config_value(config, "postprocess.temporal_motion_threshold", 0.15)
-    enable_depth_default = bool(config_value(config, "depth.enabled", False))
+    enable_depth_default = bool(config_value(config, "depth.enabled", False)) and not offline_bundle
     depth_interval_default = int(config_value(config, "depth.interval", 5))
 
     with gr.Blocks(
         title="人像视频抠像工作台",
+        analytics_enabled=False,
         theme=gr.themes.Base(primary_hue="blue", neutral_hue="slate"),
         css=_build_css(),
     ) as demo:
@@ -966,6 +986,8 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
             with gr.Tabs(elem_classes=["workspace-tabs"]):
                 with gr.Tab("视频处理"):
                     gr.Markdown("上传视频 → 选择效果 → 开始处理。默认处理完整视频，结果与运行报告均可下载；透明PNG不含声音。")
+                    if offline_bundle:
+                        gr.Markdown("已启用离线RVM模式：使用已准备的模型包，模型选择已固定；远近标注不在该包内，暂不启用。")
                     with gr.Row(elem_classes=["workspace-row"]):
                         with gr.Column(scale=7, elem_classes=["media-column"]):
                             with gr.Group(elem_classes=["panel"]):
@@ -1018,7 +1040,7 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                 with gr.Column(elem_classes=["control-stack"]):
                                     model_input = gr.Dropdown(
                                         label="抠像模型",
-                                        choices=MODEL_CHOICES,
+                                        choices=batch_models,
                                         value=batch_model_default,
                                         info="建议先用轻量RVM。其他模型需提前准备权重并验证效果。",
                                     )
@@ -1053,6 +1075,7 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                         enable_depth_input = gr.Checkbox(
                                             label="启用相对远近标注",
                                             value=enable_depth_default,
+                                            interactive=not offline_bundle,
                                             info="Near/Mid/Far是相对远近，不表示实际米数；开启会增加处理时间。",
                                         )
                                         depth_interval_input = gr.Slider(
@@ -1156,7 +1179,7 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                 with gr.Column(elem_classes=["control-stack"]):
                                     live_model = gr.Dropdown(
                                         label="Model",
-                                        choices=["dummy", "rvm_mobilenetv3"],
+                                        choices=live_models,
                                         value=live_model_default,
                                     )
                                     live_device = gr.Dropdown(
@@ -1227,7 +1250,8 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                             value=temporal_threshold_default, minimum=0, maximum=1,
                                             info="大于0且不超过1；越小越容易跟随变化，也可能增加闪烁。",
                                         )
-                                    live_depth = gr.Checkbox(label="Relative Distance (Near / Mid / Far)", value=False)
+                                    live_depth = gr.Checkbox(label="Relative Distance (Near / Mid / Far)", value=False,
+                                                             interactive=not offline_bundle)
                                     live_depth_interval = gr.Slider(label="Depth Update Interval", minimum=1, maximum=30, value=5, step=1)
                                     live_session = gr.State(LiveRunnerCache())
                                     reset_live_button = gr.Button(

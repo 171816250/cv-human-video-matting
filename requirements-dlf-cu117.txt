@@ -1,4 +1,7 @@
-# GPU environment used on this machine:
+# HISTORICAL REFERENCE ONLY. Do not use for a new delivery installation.
+# This is not a complete freeze of the existing DLF environment and is not the
+# current doctor profile. See docs/INSTALLATION.md and requirements-demo.txt.
+# Historical GPU environment used on this machine:
 #   conda env: DLF
 #   Python: 3.9.13
 #   torch: 1.13.0+cu117
@@ -8,7 +11,6 @@
 numpy==1.23.5
 opencv-python==4.8.1.78
 PyYAML>=6.0
-pytest>=8.0
 tqdm>=4.66
 Pillow>=10.0
 transformers>=4.40

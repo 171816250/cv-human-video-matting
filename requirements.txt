@@ -1,13 +1,11 @@
-opencv-python>=4.9
-numpy>=1.24
-Pillow>=10.0
-PyYAML>=6.0
-gradio>=4.0
-torch>=2.3
-torchvision>=0.18
-transformers>=4.40
-timm>=0.9
-safetensors>=0.4
-tqdm>=4.66
-pytest>=8.0
+# Base RVM + local web UI. Use requirements-demo.txt for the delivery profile.
+# Install this matching pair from the official CPU/CUDA index first.
+torch==2.5.1
+torchvision==0.20.1
+opencv-python>=4.9,<5
+numpy>=1.24,<2
+Pillow>=10.0,<11
+PyYAML>=6.0,<7
+gradio>=4.37.2,<5
+packaging>=23.2,<26
 imageio-ffmpeg==0.6.0

@@ -1,0 +1,6 @@
+# Optional BiRefNet / MiDaS dependencies, installed on top of requirements-demo.txt.
+# These are candidate compatibility pins; real model inference requires separate validation.
+# MiDaS needs timm (and its safetensors dependency); BiRefNet also needs transformers.
+transformers==4.41.2
+timm==1.0.27
+safetensors==0.4.3

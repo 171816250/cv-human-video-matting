@@ -15,6 +15,7 @@ from cv_human_video_matting.utils import config as config_module
 @pytest.fixture
 def environment(monkeypatch, tmp_path):
     state = SimpleNamespace(config={"matting": {"model": "dummy"}}, errors={}, versions={},
+                            vision_requires=["torch==2.5.1"],
                             ffmpeg_error=None,
                             encoders=" V....D libx264 H.264\n A..... aac AAC\n")
 
@@ -48,9 +49,9 @@ def environment(monkeypatch, tmp_path):
             "torch": "2.5.1", "torchvision": "0.20.1", "numpy": "1.26.4",
             "opencv-python": "4.10.0.84", "pillow": "10.4.0", "pyyaml": "6.0.2",
             "gradio": "4.37.2", "imageio-ffmpeg": "0.6.0", "transformers": "4.41.2",
-            "timm": "1.0.11", "safetensors": "0.4.5", "tqdm": "4.66.5", "pytest": "8.3.3",
+            "timm": "1.0.27", "safetensors": "0.4.3", "tqdm": "4.66.5", "pytest": "8.3.3",
             "huggingface-hub": "0.23.2", "fastapi": "0.111.1", "starlette": "0.37.2",
-            "pydantic": "2.8.2",
+            "pydantic": "2.8.2", "gradio-client": "1.0.2", "packaging": "25.0",
         }.get(name.lower(), "1.2.3")
 
     def load_config(path):
@@ -67,6 +68,7 @@ def environment(monkeypatch, tmp_path):
 
     monkeypatch.setattr(diagnostics.importlib, "import_module", import_module)
     monkeypatch.setattr(diagnostics, "version", version)
+    monkeypatch.setattr(diagnostics, "distribution_requires", lambda package: state.vision_requires)
     monkeypatch.setattr(diagnostics.subprocess, "run", run)
     monkeypatch.setattr(diagnostics, "_probe_ffv1", lambda cv2, np: "FFV1 round trip passed")
     monkeypatch.setattr(config_module, "load_config", load_config)
@@ -197,7 +199,92 @@ def test_optional_backend_dependencies_are_checked(environment):
     checks = checks_by_name(diagnostics.check_environment())
     assert checks["timm"]["status"] == "fail"
     assert checks["transformers"]["status"] == "pass"
+    assert checks["optional-requirements"]["status"] == "pass"
     assert checks["depth-model"]["status"] == "warn"
+
+
+def test_base_rvm_does_not_require_optional_models_or_test_tools(environment):
+    environment.config = {"matting": {"model": "rvm_mobilenetv3"}}
+    optional = ("transformers", "timm", "safetensors", "pytest", "pytest-cov")
+    for name in optional:
+        environment.versions[name] = diagnostics.PackageNotFoundError(name)
+        environment.errors[name] = ImportError(name)
+    report = diagnostics.check_environment()
+    checks = checks_by_name(report)
+    assert report["ready"]
+    assert report["optional_requirements_profile"] is None
+    assert report["checked_optional_packages"] == []
+    assert "optional-requirements" not in checks
+    assert all(name not in checks and f"requirement:{name}" not in checks for name in optional)
+
+
+@pytest.mark.parametrize("package", ["timm", "safetensors"])
+def test_enabled_depth_checks_optional_versions_without_transformers(environment, package):
+    environment.config = {"matting": {"model": "rvm_mobilenetv3"}, "depth": {"enabled": True}}
+    environment.versions[package] = "0.1.0"
+    environment.versions["transformers"] = diagnostics.PackageNotFoundError("transformers")
+    environment.errors["transformers"] = ImportError("transformers")
+    report = diagnostics.check_environment()
+    checks = checks_by_name(report)
+    assert not report["ready"]
+    assert checks[f"requirement:{package}"]["status"] == "fail"
+    assert checks["optional-requirements"]["status"] == "fail"
+    assert "transformers" not in checks
+    assert "requirement:transformers" not in checks
+    assert report["checked_optional_packages"] == ["safetensors", "timm"]
+    assert Path(report["optional_requirements_profile"]).name == "requirements-optional.txt"
+
+
+def test_enabled_birefnet_checks_transformers_version_even_when_import_works(environment):
+    environment.config = {"matting": {"model": "birefnet"}}
+    environment.versions["transformers"] = "4.33.1"
+    report = diagnostics.check_environment()
+    checks = checks_by_name(report)
+    assert not report["ready"]
+    assert checks["transformers"]["status"] == "pass"
+    assert checks["requirement:transformers"]["status"] == "fail"
+    assert checks["optional-requirements"]["status"] == "fail"
+
+
+def test_optional_profile_remains_checked_with_explicit_base_profile(environment, tmp_path):
+    profile = tmp_path / "base.txt"
+    profile.write_text("numpy>=1.24\n", encoding="utf-8")
+    environment.config = {"matting": {"model": "birefnet"}}
+    environment.versions["timm"] = diagnostics.PackageNotFoundError("timm")
+    checks = checks_by_name(diagnostics.check_environment(requirements_path=profile))
+    assert checks["requirements"]["status"] == "pass"
+    assert checks["optional-requirements"]["status"] == "fail"
+
+
+@pytest.mark.parametrize("torch_version,vision_version", [
+    ("2.5.1", "0.20.1"), ("2.5.1+cpu", "0.20.1+cpu"),
+    ("2.5.1+cu121", "0.20.1+cu121"),
+])
+def test_declared_torchvision_pair_accepts_matching_builds(environment, torch_version, vision_version):
+    environment.versions.update(torch=torch_version, torchvision=vision_version)
+    checks = checks_by_name(diagnostics.check_environment())
+    assert checks["torchvision-pair"]["status"] == "pass"
+    assert checks["requirement:torch"]["status"] == "pass"
+    assert checks["requirement:torchvision"]["status"] == "pass"
+
+
+@pytest.mark.parametrize("requires,torch_version,vision_version,detail", [
+    (["torch==2.4.1"], "2.5.1", "0.20.1", "declares"),
+    (["torch==2.5.1"], "2.5.1+cpu", "0.20.1+cu121", "Build mismatch"),
+    ([], "2.5.1", "0.20.1", "does not declare"),
+])
+def test_importable_but_inconsistent_torchvision_pair_fails(
+    environment, requires, torch_version, vision_version, detail,
+):
+    environment.vision_requires = requires
+    environment.versions.update(torch=torch_version, torchvision=vision_version)
+    report = diagnostics.check_environment()
+    checks = checks_by_name(report)
+    assert not report["ready"]
+    assert checks["torch"]["status"] == "pass"
+    assert checks["torchvision"]["status"] == "pass"
+    assert checks["torchvision-pair"]["status"] == "fail"
+    assert detail in checks["torchvision-pair"]["detail"]
 
 
 @pytest.mark.parametrize("error", [

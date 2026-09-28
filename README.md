@@ -4,34 +4,35 @@
 
 当前处于答辩候选版本准备阶段。工程测试、真实模型运行和真人素材效果评估分别记录，不以短片冒烟测试推导持续实时性能。
 
-当前候选版本为 **0.2.0rc2**：支持可校验的RVM离线模型包、自适应时间平滑、无损中间视频；增加处理前预检、提前解码结束检查，以及媒体和报告发布失败时的回滚。上版进度、停止、运行报告和中文评测汇总继续保留。
+当前候选版本为 **0.2.0rc3**：新增项目独立环境、一键离线启动、Windows CPU 完整运行依赖清单及真实网页验收脚本；基础演示与可选模型、测试依赖分别管理。保留离线模型校验、自适应平滑、无损中间视频、失败回滚与运行报告。
 
 ## 快速开始
 
-以下命令在仓库根目录运行，建议Python 3.10。已有可用环境先运行检查，无须重新安装：
+完整步骤见[独立环境安装与启动](docs/INSTALLATION.md)。本机已建立 `.venv` 并准备离线模型包，可双击根目录 **Start-Demo.cmd**，检查通过后在浏览器打开显示的本地地址。新电脑仍需先按说明安装环境和准备模型。
 
-```bash
-python -B app.py doctor --report data/output/environment.json
+以下命令以 Windows PowerShell 为例，在仓库根目录运行，建议 Python 3.10。始终使用项目 `.venv`，无须激活环境；macOS/Linux 将 `.\.venv\Scripts\python.exe` 替换为 `.venv/bin/python`，创建环境使用 `python3.10 -m venv .venv`。已有项目环境先运行检查，无须重新安装：
+
+```powershell
+.\.venv\Scripts\python.exe -B app.py doctor --report data/output/environment.json
 ```
 
 新环境先安装匹配设备的PyTorch与torchvision，再安装演示依赖。CPU示例：
 
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
-python -m pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
-python -m pip install -r requirements-demo.txt
-python -B app.py doctor
+```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install pip==24.3.1
+.\.venv\Scripts\python.exe -m pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+.\.venv\Scripts\python.exe -m pip install -r requirements-demo.txt
+.\.venv\Scripts\python.exe -B app.py doctor
 ```
 
-`requirements-demo.txt`固定关键网页和模型依赖版本，限制NumPy版本；新机器仍需环境检查和试运行。已有环境的实际版本以诊断JSON为准。
+`requirements-demo.txt`固定关键网页和模型依赖版本；`requirements-lock-windows-py310-cpu.txt`冻结本机新建 Windows / Python 3.10.16 / CPU 环境全部运行包，可替换上方演示依赖文件。新机器仍需环境检查和试运行。已有环境的实际版本以诊断JSON为准。
 
 首次模型准备需联网，请在答辩前完成：
 
-```bash
-python scripts/download_models.py --models rvm_mobilenetv3
-python -B app.py ui --host 127.0.0.1 --port 7860 --no-share
+```powershell
+.\.venv\Scripts\python.exe scripts/download_models.py --models rvm_mobilenetv3
+.\.venv\Scripts\python.exe -B app.py ui --host 127.0.0.1 --port 7860 --no-share
 ```
 
 打开本机 `http://127.0.0.1:7860`。“视频处理”上传视频、选择背景模式，默认处理全部帧；可设置输出短边、颜色、是否保留声音。“停止当前处理”会停止本会话正在处理的任务；模型加载或单帧推理需等待当前步骤返回。“摄像头预览”需允许浏览器使用摄像头，速度取决于硬件、分辨率和模型。
@@ -52,20 +53,23 @@ python -B app.py ui --host 127.0.0.1 --port 7860 --no-share
 
 网页任务存放在 `data/output/gradio_时间_标识_模式/`，视频为 `result.mp4`，报告为 `result.json`；透明模式包含帧目录与ZIP。`paths.output_dir`可更改保存位置。网页推理任务依次运行以减少显存争用；停止按钮针对已开始的当前任务，排队任务暂不能撤回。
 
-默认配置为 `configs/default.yaml`。额外配置使用 `python app.py --config 文件路径 matte ...`。布尔值写YAML的true/false，颜色写带引号的HEX字符串。显式指定不存在的RVM检查点会报错，未指定时使用预训练缓存。
+默认配置为 `configs/default.yaml`。额外配置使用 `.\.venv\Scripts\python.exe app.py --config 文件路径 matte ...`。布尔值写YAML的true/false，颜色写带引号的HEX字符串。显式指定不存在的RVM检查点会报错；没有检查点或模型包时使用预训练缓存。
 
 只有`auto`会自动选择CPU；显式指定`cuda`但GPU不可用时会提示错误。源视频已知帧数却提前解码结束时不发布截短结果；元数据帧数未知时允许读到末尾，但报告明确标记完整性未核验。视频按输入名义帧率写出，变帧率素材应先统一帧率并检查音画同步。
 
 ## 离线演示与时间平滑
 
-已有RVM缓存时，可生成独立模型包，并在空缓存、Python网络请求拦截下试运行：
+已有RVM缓存时，可生成独立模型包，并在空缓存、Python网络请求拦截下用合成素材试运行。下文模型包统一以 `weights/offline-rvm-mobilenetv3-rc2` 为例；实际路径不同请替换。已有该模型包则跳过导出命令，勿覆盖已有包：
 
-```bash
-python -B scripts/prepare_offline_model.py --output weights/offline/rvm-mobilenetv3
-python -B scripts/rehearse_offline.py --bundle weights/offline/rvm-mobilenetv3 --input data/input/demo.mp4 --output-dir data/output/offline-rehearsal --device auto
+```powershell
+.\.venv\Scripts\python.exe -B scripts/prepare_offline_model.py --output weights/offline-rvm-mobilenetv3-rc2
+.\.venv\Scripts\python.exe scripts/create_smoke_video.py
+.\.venv\Scripts\python.exe -B scripts/rehearse_offline.py --bundle weights/offline-rvm-mobilenetv3-rc2 --input data/input/smoke_demo.mp4 --output-dir data/output/offline-rehearsal --device cpu --max-frames 8
 ```
 
-网页需在配置中设置`matting.bundle`，CLI也可用`--model-bundle`指定。离线包不包含运行环境、CUDA驱动或MiDaS。导出和试运行目录必须是新目录，避免覆盖；详细步骤见[离线部署说明](docs/OFFLINE_MODEL.md)。
+网页可用 `.\.venv\Scripts\python.exe -B app.py ui --model-bundle weights/offline-rvm-mobilenetv3-rc2 --no-share` 指定模型包，也可在配置中设置 `matting.bundle`；CLI同样支持。离线界面固定包内模型并关闭深度标注，避免误选尚未准备的模型。离线包不包含运行环境、CUDA驱动或MiDaS。导出和试运行目录必须是新目录；详细步骤见[离线部署说明](docs/OFFLINE_MODEL.md)。
+
+`scripts/verify_local_demo.py` 可自动启动真实本地网页，上传样例并下载、校验视频和报告，最终回收服务。用法及网络限制见[安装与验收说明](docs/INSTALLATION.md)。
 
 网页的时间平滑默认关闭。开启时可选择“自适应”或传统EMA；CLI使用`--temporal-smooth --temporal-mode adaptive --temporal-motion-threshold 0.15`。阈值按0–1归一化alpha变化量计算；较小值更快放弃历史，也可能减少降噪作用。这是局部alpha变化启发式，真人发丝、遮挡和快速动作仍需同素材评估。
 
@@ -75,21 +79,21 @@ python -B scripts/rehearse_offline.py --bundle weights/offline/rvm-mobilenetv3 -
 
 合成素材和dummy仅用于验证处理流程：
 
-```bash
-python scripts/create_smoke_video.py
-python -B app.py matte --model dummy --device cpu --input data/input/smoke_demo.mp4 --output data/output/dummy.mp4 --mode side_by_side --max-frames 24 --report data/output/dummy.json
+```powershell
+.\.venv\Scripts\python.exe scripts/create_smoke_video.py
+.\.venv\Scripts\python.exe -B app.py matte --model dummy --device cpu --input data/input/smoke_demo.mp4 --output data/output/dummy.mp4 --mode side_by_side --max-frames 24 --report data/output/dummy.json
 ```
 
-用已准备的RVM处理经授权的真人素材：
+用已准备的RVM模型包处理经授权的真人素材。`data/input/demo.mp4` 不随源码提供，需团队另行准备原片并记录使用授权；`smoke_bg.jpg` 由上面的合成素材脚本生成：
 
-```bash
-python -B app.py matte --model rvm_mobilenetv3 --device auto --input data/input/demo.mp4 --output data/output/demo-result.mp4 --mode image --background data/backgrounds/smoke_bg.jpg --report data/output/demo-result.json
+```powershell
+.\.venv\Scripts\python.exe -B app.py matte --model rvm_mobilenetv3 --model-bundle weights/offline-rvm-mobilenetv3-rc2 --device auto --input data/input/demo.mp4 --output data/output/demo-result.mp4 --mode image --background data/backgrounds/smoke_bg.jpg --report data/output/demo-result.json
 ```
 
 调整输出尺寸和纯色背景：
 
-```bash
-python -B app.py matte --input data/input/demo.mp4 --output data/output/small.mp4 --resize-short 360 --background-color "#336699" --no-preserve-audio
+```powershell
+.\.venv\Scripts\python.exe -B app.py matte --model-bundle weights/offline-rvm-mobilenetv3-rc2 --input data/input/demo.mp4 --output data/output/small.mp4 --resize-short 360 --background-color "#336699" --no-preserve-audio
 ```
 
 `--resize-short`限制短边，仅缩小并取偶数尺寸；`matting.downsample_ratio: auto`只限制RVM内部推理长边到512以内，不单独改变输出尺寸。两者对边缘质量和速度的影响需实测。
@@ -98,30 +102,31 @@ python -B app.py matte --input data/input/demo.mp4 --output data/output/small.mp
 
 同一素材和参数至少运行三次，分别保存报告后生成可离线打开的中文汇总页：
 
-```bash
-python -B app.py summarize --reports "data/output/benchmark/run-*.json" --output data/output/benchmark/summary.html
+```powershell
+.\.venv\Scripts\python.exe -B app.py summarize --reports "data/output/benchmark/run-*.json" --output data/output/benchmark/summary.html
 ```
 
 汇总按报告记录的输入哈希、代码版本、设备、参数和处理帧数分组，展示中位数与范围；旧版或信息不足的报告单独列出。默认缓存权重仍需团队固定并另行核验，汇总不产生画质评分。
 
-```bash
-python -m pip install -r requirements-dev.txt
-python -B -m pytest -q --cov=cv_human_video_matting --cov-report=term --cov-report=xml --cov-fail-under=70
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -B -m pytest -q --cov=cv_human_video_matting --cov-report=term --cov-report=xml --cov-fail-under=70
 ```
 
 在代码已提交且无已跟踪文件修改时，生成本地候选包：
 
-```bash
-python scripts/package_release.py --output-dir ../deliverables/v0.2.0rc2 --evidence data/output/benchmark --evidence coverage.xml
+```powershell
+.\.venv\Scripts\python.exe scripts/package_release.py --output-dir ../deliverables/v0.2.0rc3 --evidence data/output/benchmark --evidence coverage.xml
 ```
 
 目标目录必须尚不存在。工具从Git提交打包源码，附明确指定的证据、可恢复的Git历史、SHA256清单与使用说明；不会自动收录未跟踪文件、模型权重或整个运行环境。候选包不等于远端正式Release。
 
-如需附上已准备的离线模型包，可另加`--evidence weights/offline/rvm-mobilenetv3`，其文件也会逐一纳入外置清单；同时保留模型包内原始LICENSE和清单。
+如需附上已准备的离线模型包，可另加`--evidence weights/offline-rvm-mobilenetv3-rc2`，其文件也会逐一纳入外置清单；同时保留模型包内原始LICENSE和清单。
 
 离线测试使用模型替身与本地合成音视频，不下载权重。GitHub Actions仅在对应平台触发，Gitee托管不代表此工作流已运行。
 
 - [答辩操作与交付清单](docs/DEFENSE_GUIDE.md)
+- [本版交付说明](docs/RELEASE_v0.2.0rc3.md)、[本版验证记录](docs/VALIDATION_v0.2.0rc3.md)
 - [申报目标对应清单](docs/INCUBATION_CHECKLIST.md)
 - [效果和速度评测方法](docs/EVALUATION.md)
 - [接口说明](docs/API.md)、[贡献指南](CONTRIBUTING.md)、[变更记录](CHANGELOG.md)

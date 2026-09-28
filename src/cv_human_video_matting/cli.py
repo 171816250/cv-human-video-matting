@@ -10,6 +10,32 @@ from tempfile import TemporaryDirectory
 import sys
 
 
+DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "default.yaml"
+
+
+def config_with_model_bundle(config: dict, bundle_path, *, select_model: bool = True) -> dict:
+    """Verify a local bundle before serving and keep the caller's config unchanged."""
+    from copy import deepcopy
+    from cv_human_video_matting.utils.model_bundle import verify_model_bundle
+
+    selected = deepcopy(config)
+    matting = selected.setdefault("matting", {})
+    expected = None
+    if not select_model:
+        model = matting.get("model", "rvm_mobilenetv3")
+        aliases = {"rvm": "mobilenetv3", "rvm_mobilenetv3": "mobilenetv3",
+                   "mobilenetv3": "mobilenetv3", "rvm_resnet50": "resnet50", "resnet50": "resnet50"}
+        if model not in aliases:
+            raise ValueError("Configured offline bundle requires a matching RVM model.")
+        if matting.get("checkpoint") is not None:
+            raise ValueError("matting.bundle and matting.checkpoint cannot be configured together.")
+        expected = aliases[model]
+    identity = verify_model_bundle(bundle_path, expected_model=expected)
+    matting.update(model="rvm_" + identity["model_name"],
+                   bundle=identity["bundle_path"], checkpoint=None)
+    return selected
+
+
 def create_matting_runner(**kwargs):
     """Load inference dependencies only when an inference command needs them."""
     from cv_human_video_matting.matting.factory import create_matting_runner as create
@@ -36,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--config",
-        default="configs/default.yaml",
+        default=str(DEFAULT_CONFIG),
         help="Path to the project YAML config.",
     )
 
@@ -46,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     summary_parser.add_argument("--output", required=True, help="Summary .html or .json path.")
     doctor_parser = subparsers.add_parser("doctor", help="Check local readiness without downloads.")
     doctor_parser.add_argument("--report", help="Save environment checks as JSON.")
+    doctor_parser.add_argument("--requirements", help="Requirements profile to check (relative to current directory).")
 
     inspect_parser = subparsers.add_parser("inspect", help="Inspect an input video.")
     inspect_parser.add_argument("--input", required=True, help="Input video path.")
@@ -160,6 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     ui_parser = subparsers.add_parser("ui", help="Launch the Gradio demo UI.")
     ui_parser.add_argument("--host", default="127.0.0.1", help="Server host.")
     ui_parser.add_argument("--port", type=int, default=7860, help="Server port.")
+    ui_parser.add_argument("--model-bundle", help="Verified offline RVM bundle; selects its model and clears checkpoint.")
     ui_parser.add_argument(
         "--share",
         action=argparse.BooleanOptionalAction,
@@ -178,7 +206,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "doctor":
         from cv_human_video_matting.diagnostics import check_environment, save_diagnostics
-        report = check_environment(args.config)
+        report = check_environment(args.config, requirements_path=args.requirements)
         for check in report["checks"]:
             print(f"[{check['status'].upper()}] {check['name']}: {check['detail']}")
         if args.report:
@@ -197,6 +225,20 @@ def main(argv: list[str] | None = None) -> None:
             paths.extend(matches)
         paths = list(dict.fromkeys(paths))
         print(f"Evaluation summary: {write_evaluation_summary(paths, args.output)}")
+        return
+    if args.command == "ui":
+        from cv_human_video_matting.utils.config import load_config
+
+        if not 1 <= args.port <= 65535:
+            parser.error("Server port must be between 1 and 65535.")
+        config = load_config(args.config)
+        configured_bundle = config.get("matting", {}).get("bundle")
+        if args.model_bundle is not None or configured_bundle is not None:
+            config = config_with_model_bundle(config, args.model_bundle or configured_bundle,
+                                              select_model=args.model_bundle is not None)
+        from cv_human_video_matting.ui.gradio_app import launch_demo
+
+        launch_demo(server_name=args.host, server_port=args.port, share=args.share, config=config)
         return
     from cv_human_video_matting.io.video import copy_video, probe_video, export_video_for_delivery
     from cv_human_video_matting.pipeline import process_video, validate_video_request
@@ -392,12 +434,6 @@ def main(argv: list[str] | None = None) -> None:
             f"Processed {stats.frames} frame(s) in {stats.elapsed_seconds:.3f}s "
             f"({stats.fps:.2f} FPS)."
         )
-        return
-
-    if args.command == "ui":
-        from cv_human_video_matting.ui.gradio_app import launch_demo
-
-        launch_demo(server_name=args.host, server_port=args.port, share=args.share, config=config)
         return
 
 if __name__ == "__main__":

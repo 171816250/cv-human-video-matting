@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import importlib
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError, requires as distribution_requires, version
 import json
 from pathlib import Path
 import platform
@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 
-def _check_requirements(path: Path, record) -> None:
+def _check_requirements(path: Path, record, *, packages=None, summary_name="requirements") -> None:
     """Evaluate declared package constraints against local metadata without pip/network."""
     try:
         from packaging.requirements import Requirement
@@ -46,10 +46,15 @@ def _check_requirements(path: Path, record) -> None:
             visited.add(source)
 
         read_requirements(path, set())
+        if packages is not None:
+            missing = set(packages) - declarations.keys()
+            if missing:
+                raise ValueError(f"Profile does not declare enabled dependencies: {', '.join(sorted(missing))}")
+            declarations = {name: entries for name, entries in declarations.items() if name in packages}
         if not declarations:
             raise ValueError("Requirements profile contains no applicable package requirements.")
     except Exception as exc:
-        record("requirements", "fail", f"Cannot verify declared dependencies in {path}: {exc}")
+        record(summary_name, "fail", f"Cannot verify declared dependencies in {path}: {exc}")
         return
 
     failed = []
@@ -66,9 +71,43 @@ def _check_requirements(path: Path, record) -> None:
         if status == "fail":
             failed.append(name)
         record(f"requirement:{name}", status, detail)
-    record("requirements", "fail" if failed else "pass",
+    record(summary_name, "fail" if failed else "pass",
            f"Profile: {path.resolve()}; {len(declarations)} packages checked. "
            + (f"Unmet/unverified: {', '.join(failed)}" if failed else "All declared package constraints met."))
+
+
+def _check_torchvision_pair(record) -> None:
+    """Verify torchvision's installed Torch requirement, including known build tags."""
+    try:
+        from packaging.requirements import Requirement
+        from packaging.version import Version
+
+        torch_version = version("torch")
+        vision_version = version("torchvision")
+        requirements = []
+        for raw in distribution_requires("torchvision") or []:
+            requirement = Requirement(raw)
+            if requirement.name.lower() == "torch" and (
+                requirement.marker is None or requirement.marker.evaluate({"extra": ""})
+            ):
+                requirements.append(requirement)
+        if not requirements:
+            raise ValueError("TorchVision metadata does not declare a Torch dependency.")
+        declared = "; ".join(str(requirement) for requirement in requirements)
+        if not all(requirement.specifier.contains(torch_version, prereleases=True)
+                   for requirement in requirements):
+            raise ValueError(f"TorchVision {vision_version} declares {declared}; installed Torch {torch_version}.")
+        torch_build = Version(torch_version).local
+        vision_build = Version(vision_version).local
+        if torch_build and vision_build and torch_build != vision_build:
+            raise ValueError(f"Build mismatch: Torch {torch_version}, TorchVision {vision_version}.")
+        record("torchvision-pair", "pass",
+               f"Torch {torch_version} satisfies TorchVision {vision_version}: {declared}. "
+               "Module import and array conversion are checked separately.")
+    except Exception as exc:
+        record("torchvision-pair", "fail",
+               f"Cannot verify the installed Torch/TorchVision pair: {exc} "
+               "Install both from the same official CPU/CUDA index; see docs/INSTALLATION.md.")
 
 
 def _probe_ffv1(cv2, np) -> str:
@@ -113,7 +152,10 @@ def check_environment(config_path="configs/default.yaml", requirements_path=None
     requirements = (Path(requirements_path) if requirements_path is not None
                     else Path(__file__).resolve().parents[2] / "requirements-demo.txt")
     _check_requirements(requirements, record)
+    _check_torchvision_pair(record)
     modules = {}
+    optional_packages = set()
+    optional_profile = None
 
     def check_import(name, package):
         try:
@@ -170,10 +212,15 @@ def check_environment(config_path="configs/default.yaml", requirements_path=None
             except Exception as exc:
                 record("model-bundle", "fail", exc)
         if model in {"birefnet", "ultra"}:
-            for name in ("transformers", "timm", "safetensors"):
+            optional_packages.update(("transformers", "timm", "safetensors"))
+        if config.get("depth", {}).get("enabled", False):
+            optional_packages.update(("timm", "safetensors"))
+        if optional_packages:
+            optional_profile = Path(__file__).resolve().parents[2] / "requirements-optional.txt"
+            _check_requirements(optional_profile, record, packages=optional_packages,
+                                summary_name="optional-requirements")
+            for name in sorted(optional_packages):
                 check_import(name, name)
-        elif config.get("depth", {}).get("enabled", False):
-            check_import("timm", "timm")
 
     torch = modules.get("torch")
     if torch is not None:
@@ -219,6 +266,7 @@ def check_environment(config_path="configs/default.yaml", requirements_path=None
             record("model-cache", "warn", "Optional backend: verify its weights and a full run before the demo.")
     if config_valid and config.get("depth", {}).get("enabled", False):
         record("depth-model", "warn", "Depth is enabled; MiDaS code/weights are not included in the RVM bundle. "
+               "MiDaS_small also needs the gen-efficientnet-pytorch code and backbone weights. "
                "Prepare depth separately and rehearse a full run before going offline.")
 
     if "cv2" in modules and "numpy" in modules:
@@ -248,6 +296,8 @@ def check_environment(config_path="configs/default.yaml", requirements_path=None
     return {"schema_version": 1, "created_at": datetime.now(timezone.utc).isoformat(),
             "ready": not any(item["status"] == "fail" for item in checks),
             "requirements_profile": str(requirements.resolve()),
+            "optional_requirements_profile": str(optional_profile.resolve()) if optional_profile else None,
+            "checked_optional_packages": sorted(optional_packages),
             "scope": "Local dependency versions/imports, config, model bundle integrity and codec checks only; warnings require a rehearsal. No model quality, source-trust or speed guarantee.",
             "checks": checks}
 

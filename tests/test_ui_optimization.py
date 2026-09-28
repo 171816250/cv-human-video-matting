@@ -76,7 +76,7 @@ def test_adaptive_config_is_used_and_reported(source, monkeypatch, mode, codec):
     assert not list(ui.OUTPUT_DIR.glob(".batch-*"))
 
 
-@pytest.mark.parametrize("selected,expected", [("rvm_mobilenetv3", True), ("rvm_resnet50", False)])
+@pytest.mark.parametrize("selected,expected", [("rvm_mobilenetv3", True), ("dummy", False)])
 def test_batch_bundle_selection_and_loaded_identity_reach_report(source, tmp_path, monkeypatch,
                                                                  selected, expected):
     bundle = tmp_path / "bundle"
