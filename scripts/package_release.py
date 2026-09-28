@@ -207,8 +207,10 @@ def _start_here(version: str, commit: str, branch: str, evidence_count: int) -> 
 分支：{branch}
 
 这是从已提交代码生成的本地候选交付物，不等于已在远端发布 Release。
-包内没有 Python 运行环境、模型权重或已安装依赖。运行前请阅读 source/README.md，
-按说明准备依赖与模型。离线测试通过不能替代真实人像质量与摄像头验证。
+包内没有 Python 运行环境或已安装依赖。source/ 不含模型权重；evidence/ 仅包含
+打包时明确选入的证据，可能包含单独准备的离线模型包，以 manifest.json 为准。
+运行前请阅读 source/README.md 及 evidence/ 中的说明，按要求准备依赖与模型。
+离线测试通过不能替代真实人像质量与摄像头验证。
 
 ## 内容与使用
 

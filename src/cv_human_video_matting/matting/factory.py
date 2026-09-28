@@ -8,6 +8,7 @@ from cv_human_video_matting.matting.base import MattingRunner
 from cv_human_video_matting.matting.birefnet import BiRefNetRunner
 from cv_human_video_matting.matting.dummy import DummyMattingRunner
 from cv_human_video_matting.matting.rvm import RVMRunner
+from cv_human_video_matting.utils.config import validate_model_settings
 
 
 def create_matting_runner(
@@ -15,16 +16,18 @@ def create_matting_runner(
     checkpoint: str | Path | None = None,
     device: str = "cpu",
     downsample_ratio: float | str = 1.0,
+    bundle_path: str | Path | None = None,
 ) -> MattingRunner:
+    downsample_ratio = validate_model_settings(model, checkpoint, bundle_path, downsample_ratio)
     normalized = model.lower()
     if normalized == "dummy":
         return DummyMattingRunner()
     if normalized in {"rvm", "rvm_mobilenetv3", "mobilenetv3"}:
         return RVMRunner(model_name="mobilenetv3", checkpoint=checkpoint, device=device,
-                         downsample_ratio=downsample_ratio)
+                         downsample_ratio=downsample_ratio, bundle_path=bundle_path)
     if normalized in {"rvm_resnet50", "resnet50"}:
         return RVMRunner(model_name="resnet50", checkpoint=checkpoint, device=device,
-                         downsample_ratio=downsample_ratio)
+                         downsample_ratio=downsample_ratio, bundle_path=bundle_path)
     if normalized in {"birefnet", "ultra"}:
         return BiRefNetRunner(device=device)
     raise ValueError(f"Unsupported matting model: {model}")

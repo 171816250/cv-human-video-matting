@@ -15,6 +15,9 @@ from cv_human_video_matting.ui.jobs import BatchJobs
 
 
 def test_gradio_http_cancel_then_download_report(tmp_path, monkeypatch):
+    # This test only calls a local server; system proxies must not intercept it.
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     source = tmp_path / "source.mp4"
     writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*"mp4v"), 24, (64, 48))
     assert writer.isOpened()
@@ -43,7 +46,7 @@ def test_gradio_http_cancel_then_download_report(tmp_path, monkeypatch):
         other = Client(f"http://127.0.0.1:{port}", verbose=False)
         clients.extend([owner, other])
         args = [handle_file(str(source)), None, "rvm_mobilenetv3", "green", 0, "cpu",
-                0, 0, 0, False, 0.75, False, 5, False, 0, "#00FF00"]
+                0, 0, 0, True, 0.75, False, 5, False, 0, "#00FF00", "adaptive", 0.15]
         job = owner.submit(*args, api_name="/process_video")
         assert entered.wait(20)
         assert owner.session_hash in ui._BATCH_JOBS._active
@@ -62,6 +65,9 @@ def test_gradio_http_cancel_then_download_report(tmp_path, monkeypatch):
         assert report["result"]["frames"] == 12
         assert Path(report["result"]["output_path"]).is_file()
         assert report["schema_version"] == 3
+        assert report["options"]["temporal_mode"] == "adaptive"
+        assert report["options"]["temporal_motion_threshold"] == 0.15
+        assert report["options"]["intermediate_codec"] == "FFV1"
     finally:
         release.set()
         for client in clients:

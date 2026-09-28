@@ -119,14 +119,14 @@ def _same_file(left: Path, right: Path) -> bool:
     return left.exists() and right.exists() and left.samefile(right)
 
 
-def _checked_video(path: Path) -> VideoInfo:
+def _checked_video(path: Path, *, allow_unknown_frames: bool = False) -> VideoInfo:
     if not path.is_file() or path.stat().st_size == 0:
         raise ValueError(f"Video is missing or empty: {path}")
     info = probe_video(path)
     if (
         info.width <= 0
         or info.height <= 0
-        or info.frame_count <= 0
+        or (not allow_unknown_frames and info.frame_count <= 0)
         or not math.isfinite(info.fps)
         or info.fps <= 0
     ):
@@ -219,7 +219,9 @@ def export_video_for_delivery(
         raise ValueError("Delivery output must not overwrite the original source video.")
     info = _checked_video(processed)
     if preserve_audio and original is not None:
-        _checked_video(original)
+        # Original audio can be demuxed even when its container cannot report a
+        # total video frame count. Duration is always bounded by processed output.
+        _checked_video(original, allow_unknown_frames=True)
 
     try:
         import imageio_ffmpeg
@@ -273,9 +275,14 @@ def export_video_for_delivery(
     try:
         _run_encoder(command, should_cancel)
         try:
-            _checked_video(temporary)
+            delivered_info = _checked_video(temporary)
         except (OSError, ValueError) as exc:
             raise RuntimeError("FFmpeg did not produce a valid, nonempty video.") from exc
+        if delivered_info.frame_count != info.frame_count:
+            raise RuntimeError(
+                f"FFmpeg output frame count mismatch: expected {info.frame_count}, "
+                f"found {delivered_info.frame_count}; existing delivery output was preserved."
+            )
         check_cancelled(should_cancel)
         temporary.replace(output)
         return output

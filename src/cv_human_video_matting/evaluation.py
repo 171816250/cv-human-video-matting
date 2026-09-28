@@ -78,6 +78,13 @@ def _conditions(report: dict) -> tuple[dict | None, list[str], dict | None]:
         if options.get(name) and (not isinstance(assets.get(name), dict)
                                   or not _sha256(assets[name].get("sha256"))):
             reasons.append(f"缺少{name}文件哈希。")
+    if options.get("model_bundle"):
+        bundle = assets.get("model_bundle", {})
+        if (not isinstance(bundle, dict) or not _sha256(bundle.get("content_sha256"))
+                or bundle.get("load_identity_confirmed") is not True
+                or not isinstance(bundle.get("weights"), dict)
+                or not _sha256(bundle["weights"].get("sha256"))):
+            reasons.append("缺少已确认加载的离线模型包与权重哈希。")
 
     measurements = None
     required = ("frames", "elapsed_seconds", "total_seconds")

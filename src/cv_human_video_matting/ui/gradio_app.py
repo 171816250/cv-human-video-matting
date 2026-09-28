@@ -36,6 +36,7 @@ from cv_human_video_matting.pipeline import (
     load_background_image,
     process_video,
     render_matting_frame,
+    validate_video_request,
 )
 from cv_human_video_matting.postprocess import TemporalAlphaSmoother
 from cv_human_video_matting.utils.config import config_value, parse_background_color, validate_project_config
@@ -74,7 +75,7 @@ _BATCH_JOBS = BatchJobs()
 
 @dataclass
 class LiveRunnerCache:
-    key: tuple[str, str, bool, float] | None = None
+    key: tuple | None = None
     runner: MattingRunner | None = None
     temporal_smoother: TemporalAlphaSmoother | None = None
     frames: int = 0
@@ -96,7 +97,6 @@ class BatchDemoResult:
 
 def _timestamped_output_path(mode: str) -> Path:
     output_dir = Path(config_value(_ACTIVE_CONFIG, "paths.output_dir", OUTPUT_DIR))
-    ensure_dir(output_dir)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return output_dir / f"gradio_{timestamp}_{uuid4().hex[:12]}_{mode}.mp4"
 
@@ -141,24 +141,45 @@ def _live_cache_for(
     temporal_smooth: bool,
     temporal_blend: float,
     cache: LiveRunnerCache | None = None,
+    temporal_mode: str | None = None,
+    temporal_motion_threshold: float | None = None,
 ) -> LiveRunnerCache:
     cache = cache if cache is not None else _LIVE_CACHE
-    key = (model, device, bool(temporal_smooth), round(float(temporal_blend), 3))
+    temporal_mode, temporal_motion_threshold = _temporal_settings(
+        temporal_mode, temporal_motion_threshold)
+    configured_model = config_value(_ACTIVE_CONFIG, "matting.model")
+    checkpoint = (config_value(_ACTIVE_CONFIG, "matting.checkpoint")
+                  if model == configured_model else None)
+    bundle_path = (config_value(_ACTIVE_CONFIG, "matting.bundle")
+                   if model == configured_model else None)
+    ratio = config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto")
+    key = (model, device, checkpoint, bundle_path, ratio, bool(temporal_smooth),
+           float(temporal_blend), temporal_mode, temporal_motion_threshold,
+           config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
+           config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
+           config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33))
     if cache.runner is None or cache.key != key:
-        checkpoint = (config_value(_ACTIVE_CONFIG, "matting.checkpoint")
-                      if model == config_value(_ACTIVE_CONFIG, "matting.model") else None)
+        # Validate temporal settings before loading a potentially large model.
+        smoother = TemporalAlphaSmoother(blend=temporal_blend, mode=temporal_mode,
+                                        motion_threshold=temporal_motion_threshold)
         runner = create_matting_runner(model=model, device=device, checkpoint=checkpoint,
-            downsample_ratio=config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"))
+            downsample_ratio=ratio, bundle_path=bundle_path)
         cache.key = key
         cache.runner = runner
-        cache.temporal_smoother = (
-            TemporalAlphaSmoother(blend=temporal_blend) if temporal_smooth else None
-        )
+        cache.temporal_smoother = smoother if temporal_smooth else None
         cache.depth_estimator = None
         cache.depth_map = None
         cache.frames = 0
         cache.started_at = perf_counter()
     return cache
+
+
+def _temporal_settings(mode, motion_threshold):
+    if mode is None:
+        mode = config_value(_ACTIVE_CONFIG, "postprocess.temporal_mode", "ema")
+    if motion_threshold is None:
+        motion_threshold = config_value(_ACTIVE_CONFIG, "postprocess.temporal_motion_threshold", 0.15)
+    return mode, motion_threshold
 
 
 def reset_live_state() -> str:
@@ -200,6 +221,8 @@ def _run_batch_demo(
     background_color: str | None = None,
     progress=None,
     should_cancel=None,
+    temporal_mode: str | None = None,
+    temporal_motion_threshold: float | None = None,
 ) -> BatchDemoResult:
     if not video_path:
         raise gr.Error("Please upload an input video first.")
@@ -221,6 +244,8 @@ def _run_batch_demo(
         preserve_audio = config_value(_ACTIVE_CONFIG, "render.preserve_audio", True)
     background_color = background_color or config_value(_ACTIVE_CONFIG, "render.background_color", "#00FF00")
     color_bgr = parse_background_color(background_color)
+    temporal_mode, temporal_motion_threshold = _temporal_settings(
+        temporal_mode, temporal_motion_threshold)
 
     def check_cancelled():
         if should_cancel and should_cancel():
@@ -239,29 +264,40 @@ def _run_batch_demo(
         config_value(_ACTIVE_CONFIG, "matting.checkpoint")
         if model == config_value(_ACTIVE_CONFIG, "matting.model") else None
     )
+    bundle_path = (config_value(_ACTIVE_CONFIG, "matting.bundle")
+                   if model == config_value(_ACTIVE_CONFIG, "matting.model") else None)
+    from cv_human_video_matting.reporting import validate_artifact_paths
+    validate_artifact_paths(final_directory / "result.json", video_path, final_directory,
+                            asset_paths=(background_path, checkpoint, bundle_path))
+    ensure_dir(output_path.parent)
     started_at = perf_counter()
-    if progress is not None:
-        progress(0, desc="正在准备模型，首次加载可能需要较长时间…")
-    runner = create_matting_runner(model=model, checkpoint=checkpoint, device=actual_device,
-        downsample_ratio=config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"))
-    check_cancelled()
     with TemporaryDirectory(prefix=".batch-", dir=output_path.parent) as staging:
-        stats = process_video(
+        processing_args = dict(
             input_path=video_path,
-            output_path=Path(staging) / "processed.mp4",
-            runner=runner, mode=mode,
+            output_path=Path(staging) / "processed.mkv",
+            mode=mode,
             max_frames=max_frames if max_frames > 0 else None,
             background_path=background_path,
             edge_feather=edge_feather, mask_open=mask_open, mask_close=mask_close,
             temporal_smooth=temporal_smooth, temporal_blend=temporal_blend,
-            enable_depth=enable_depth, depth_interval=depth_interval, device=actual_device,
+            temporal_mode=temporal_mode, temporal_motion_threshold=temporal_motion_threshold,
+            enable_depth=enable_depth, depth_interval=depth_interval,
             resize_short=resize_short,
             depth_model=config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
             depth_near=config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
             depth_mid=config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33),
             background_color_bgr=color_bgr,
-            progress_callback=frame_progress, should_cancel=should_cancel,
         )
+        validate_video_request(**processing_args)
+        check_cancelled()
+        if progress is not None:
+            progress(0, desc="正在准备模型，首次加载可能需要较长时间…")
+        runner = create_matting_runner(model=model, checkpoint=checkpoint, device=actual_device,
+            downsample_ratio=config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"),
+            bundle_path=bundle_path)
+        check_cancelled()
+        stats = process_video(**processing_args, runner=runner, device=actual_device,
+                              progress_callback=frame_progress, should_cancel=should_cancel)
         export_started = perf_counter()
         check_cancelled()
         if progress is not None:
@@ -291,9 +327,12 @@ def _run_batch_demo(
         from cv_human_video_matting.reporting import write_run_report
         write_run_report(Path(staging) / "result.json", video_path, stats, {
             "model": model, "checkpoint": checkpoint, "device": actual_device, "mode": mode,
+            "model_bundle": str(bundle_path) if bundle_path is not None else None,
             "max_frames": max_frames if max_frames > 0 else None, "background": background_path,
             "edge_feather": edge_feather, "mask_open": mask_open, "mask_close": mask_close,
             "temporal_smooth": temporal_smooth, "temporal_blend": temporal_blend,
+            "temporal_mode": temporal_mode, "temporal_motion_threshold": temporal_motion_threshold,
+            "intermediate_codec": "PNG" if mode == "transparent" else "FFV1",
             "enable_depth": enable_depth, "depth_interval": depth_interval,
             "downsample_ratio": config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"),
             "resize_short": resize_short,
@@ -302,7 +341,8 @@ def _run_batch_demo(
             "depth_mid": config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33),
             "background_color": background_color,
             "preserve_audio": preserve_audio and mode != "transparent",
-        }, total_seconds, export_seconds=export_seconds, published_output_path=published_output)
+        }, total_seconds, export_seconds=export_seconds, published_output_path=published_output,
+           model_bundle_info=getattr(runner, "bundle_info", None))
         check_cancelled()
         if final_directory.exists():
             raise FileExistsError(f"Output directory already exists: {final_directory}")
@@ -344,6 +384,8 @@ def run_demo(
     temporal_blend: float = 0.75,
     enable_depth: bool = False,
     depth_interval: int = 5,
+    temporal_mode: str | None = None,
+    temporal_motion_threshold: float | None = None,
 ) -> tuple[str | None, str]:
     result = _run_batch_demo(
         video_path=video_path,
@@ -359,6 +401,8 @@ def run_demo(
         temporal_blend=temporal_blend,
         enable_depth=enable_depth,
         depth_interval=depth_interval,
+        temporal_mode=temporal_mode,
+        temporal_motion_threshold=temporal_motion_threshold,
     )
     return result.video_path or result.artifact_path, result.status
 
@@ -382,6 +426,8 @@ def run_demo_for_ui(
     background_color: str | None = None,
     progress=gr.Progress(),
     request: gr.Request = gr.Request(),
+    temporal_mode: str | None = None,
+    temporal_motion_threshold: float | None = None,
 ):
     session_id = getattr(request, "session_hash", None) or uuid4().hex
     try:
@@ -395,6 +441,7 @@ def run_demo_for_ui(
                 preserve_audio=preserve_audio, resize_short=resize_short,
                 background_color=background_color, progress=progress,
                 should_cancel=token.is_set,
+                temporal_mode=temporal_mode, temporal_motion_threshold=temporal_motion_threshold,
             )
     except ProcessingCancelled:
         return gr.update(), gr.update(), "本次处理已停止，未发布新结果。", gr.update()
@@ -432,6 +479,8 @@ def render_live_frame(
     enable_depth: bool = False,
     depth_interval: int = 5,
     cache: LiveRunnerCache | None = None,
+    temporal_mode: str | None = None,
+    temporal_motion_threshold: float | None = None,
 ) -> tuple[np.ndarray | None, str]:
     if frame_rgb is None:
         return None, "Waiting for camera frame."
@@ -448,6 +497,8 @@ def render_live_frame(
         temporal_smooth=temporal_smooth,
         temporal_blend=temporal_blend,
         cache=cache,
+        temporal_mode=temporal_mode,
+        temporal_motion_threshold=temporal_motion_threshold,
     )
     if cache.runner is None:
         return None, "Live model failed to initialize."
@@ -496,7 +547,12 @@ def render_live_frame(
 def render_live_frame_for_ui(*args):
     # gr.State supplies an independent cache for each browser session.
     cache = args[-1]
-    image, status = render_live_frame(*args[:-1], cache=cache)
+    controls = args[:-1]
+    temporal_settings = {}
+    if len(controls) > 13:
+        temporal_settings = dict(temporal_mode=controls[13], temporal_motion_threshold=controls[14])
+        controls = controls[:13]
+    image, status = render_live_frame(*controls, cache=cache, **temporal_settings)
     return image, status, cache
 
 
@@ -876,6 +932,8 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
         config_value(config, "postprocess.enable_temporal_smooth", False)
     )
     temporal_blend_default = float(config_value(config, "postprocess.temporal_alpha", 0.75))
+    temporal_mode_default = config_value(config, "postprocess.temporal_mode", "ema")
+    temporal_threshold_default = config_value(config, "postprocess.temporal_motion_threshold", 0.15)
     enable_depth_default = bool(config_value(config, "depth.enabled", False))
     depth_interval_default = int(config_value(config, "depth.interval", 5))
 
@@ -1027,17 +1085,29 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                             value=mask_close_default,
                                             step=1,
                                         )
-                                    with gr.Accordion("Temporal Controls", open=True):
+                                    with gr.Accordion("减少画面闪烁", open=True):
                                         temporal_smooth_input = gr.Checkbox(
-                                            label="Temporal Smooth",
+                                            label="启用时间平滑",
                                             value=temporal_smooth_default,
+                                            info="平滑可减轻遮罩闪烁；快速运动时也可能产生拖影，默认关闭。",
+                                        )
+                                        temporal_mode_input = gr.Dropdown(
+                                            label="平滑方式",
+                                            choices=[("固定平滑", "ema"), ("运动自适应（实验）", "adaptive")],
+                                            value=temporal_mode_default,
+                                            info="自适应方式在遮罩明显变化的位置减弱历史残留，仍需结合原片检查。",
                                         )
                                         temporal_blend_input = gr.Slider(
-                                            label="Temporal Blend",
+                                            label="历史帧权重",
                                             minimum=0.0,
                                             maximum=0.95,
                                             value=temporal_blend_default,
                                             step=0.05,
+                                        )
+                                        temporal_threshold_input = gr.Number(
+                                            label="自适应变化阈值",
+                                            value=temporal_threshold_default, minimum=0, maximum=1,
+                                            info="取值大于0且不超过1，仅自适应方式使用；越小越容易跟随变化，也可能增加闪烁。",
                                         )
                                     run_button = gr.Button(
                                         "开始处理",
@@ -1133,17 +1203,29 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                             value=mask_close_default,
                                             step=1,
                                         )
-                                    with gr.Accordion("Temporal Controls", open=True):
+                                    with gr.Accordion("减少画面闪烁", open=True):
                                         live_temporal_smooth = gr.Checkbox(
-                                            label="Temporal Smooth",
+                                            label="启用时间平滑",
                                             value=temporal_smooth_default,
+                                            info="可减轻闪烁，但快速运动可能有拖影；默认关闭。",
+                                        )
+                                        live_temporal_mode = gr.Dropdown(
+                                            label="平滑方式",
+                                            choices=[("固定平滑", "ema"), ("运动自适应（实验）", "adaptive")],
+                                            value=temporal_mode_default,
+                                            info="自适应方式在遮罩变化处减少历史残留。",
                                         )
                                         live_temporal_blend = gr.Slider(
-                                            label="Temporal Blend",
+                                            label="历史帧权重",
                                             minimum=0.0,
                                             maximum=0.95,
                                             value=temporal_blend_default,
                                             step=0.05,
+                                        )
+                                        live_temporal_threshold = gr.Number(
+                                            label="自适应变化阈值",
+                                            value=temporal_threshold_default, minimum=0, maximum=1,
+                                            info="大于0且不超过1；越小越容易跟随变化，也可能增加闪烁。",
                                         )
                                     live_depth = gr.Checkbox(label="Relative Distance (Near / Mid / Far)", value=False)
                                     live_depth_interval = gr.Slider(label="Depth Update Interval", minimum=1, maximum=30, value=5, step=1)
@@ -1178,6 +1260,8 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                     preserve_audio_input,
                     resize_short_input,
                     background_color_input,
+                    temporal_mode_input,
+                    temporal_threshold_input,
                 ],
                 outputs=[output_video, output_file, status_output, report_file],
                 api_name="process_video",
@@ -1204,6 +1288,8 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                     live_temporal_blend,
                     live_depth,
                     live_depth_interval,
+                    live_temporal_mode,
+                    live_temporal_threshold,
                     live_session,
                 ],
                 outputs=[live_output, live_status, live_session],

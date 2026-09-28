@@ -2,6 +2,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from cv_human_video_matting.io.video import probe_video
 from cv_human_video_matting.matting.dummy import DummyMattingRunner
@@ -172,21 +173,18 @@ def test_transparent_output_dir_appends_frames_suffix_without_extension(tmp_path
     assert out != target
 
 
-def test_process_video_depth_interval_zero_does_not_crash(tmp_path):
+def test_process_video_rejects_zero_depth_interval_even_when_depth_disabled(tmp_path):
     input_path = tmp_path / "input.mp4"
     output_path = tmp_path / "green.mp4"
     _write_test_video(input_path)
 
-    # depth_interval=0 must be clamped instead of raising ZeroDivisionError.
-    # DummyMattingRunner has no depth model, so enable_depth stays False; the
-    # clamp itself is what we assert does not raise.
-    stats = process_video(
-        input_path=input_path,
-        output_path=output_path,
-        runner=DummyMattingRunner(),
-        mode="green",
-        max_frames=3,
-        depth_interval=0,
-    )
-
-    assert stats.frames == 3
+    with pytest.raises(ValueError, match="depth.interval"):
+        process_video(
+            input_path=input_path,
+            output_path=output_path,
+            runner=DummyMattingRunner(),
+            mode="green",
+            max_frames=3,
+            depth_interval=0,
+        )
+    assert not output_path.exists()

@@ -51,6 +51,8 @@ python -B -m pytest -q --cov=cv_human_video_matting --cov-report=term --cov-repo
 
 ## 现场故障处理
 
+0.2.0rc2可提前准备带内容校验的RVM离线模型包，并运行`scripts/rehearse_offline.py`完成空缓存试运行。时间平滑新增自适应选项，默认仍关闭；对比相同动作的结果后再决定是否用于演示。Doctor现在核对声明的依赖版本，本机运行成功与全新环境安装验收需要分别记录，失败项不能改填为通过。操作见[离线模型与部署](OFFLINE_MODEL.md)。
+
 | 现象 | 处理 |
 | --- | --- |
 | 模型加载等待或网络失败 | 检查权重缓存，先用准备好的输出讲解；回到已试运行的RVM模型 |

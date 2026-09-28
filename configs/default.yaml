@@ -12,11 +12,16 @@ matting:
   model: rvm_mobilenetv3
   # null uses the model's pretrained weights; set an existing file for a custom checkpoint.
   checkpoint: null
+  # Optional verified offline RVM code + weights directory, mutually exclusive with checkpoint.
+  bundle: null
   downsample_ratio: auto
 
 postprocess:
   enable_temporal_smooth: false
   temporal_alpha: 0.75
+  # Only used when smoothing is enabled; adaptive reduces history at changing edges.
+  temporal_mode: adaptive
+  temporal_motion_threshold: 0.15
   edge_feather: 0
   mask_open: 0
   mask_close: 0

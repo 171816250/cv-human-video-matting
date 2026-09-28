@@ -98,6 +98,10 @@ def validate_project_config(config: dict[str, Any]) -> None:
     if "interval" in depth:
         integer("depth.interval", 1)
     number("postprocess.temporal_alpha", 0.75, 0.0, 1.0)
+    if number("postprocess.temporal_motion_threshold", 0.15, 0.0, 1.0) == 0:
+        raise ValueError("postprocess.temporal_motion_threshold must be in (0, 1].")
+    if "temporal_mode" in config.get("postprocess", {}):
+        choice("postprocess.temporal_mode", {"ema", "adaptive"})
     near = number("depth.thresholds.near", 0.66, 0.0, 1.0)
     mid = number("depth.thresholds.mid", 0.33, 0.0, 1.0)
     if not mid < near:
@@ -126,6 +130,41 @@ def validate_project_config(config: dict[str, Any]) -> None:
         if number("matting.downsample_ratio", 1.0, 0.0, 1.0) == 0:
             raise ValueError("matting.downsample_ratio must be 'auto' or a number in (0, 1].")
     parse_background_color(config_value(config, "render.background_color", "#00FF00"))
+    matting = config.get("matting", {})
+    for name in ("checkpoint", "bundle"):
+        value = matting.get(name)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"matting.{name} must be a non-empty path string or null.")
+    if matting.get("checkpoint") and matting.get("bundle"):
+        raise ValueError("Choose matting.checkpoint or matting.bundle, not both.")
+
+
+def validate_model_settings(model, checkpoint=None, bundle_path=None, downsample_ratio="auto"):
+    """Validate model inputs without importing or initializing any inference backend."""
+    normalized = model.lower()
+    rvm_models = {"rvm", "rvm_mobilenetv3", "mobilenetv3", "rvm_resnet50", "resnet50"}
+    if normalized not in rvm_models | {"dummy", "birefnet", "ultra"}:
+        raise ValueError(f"Unsupported matting model: {model}")
+    if checkpoint is not None and bundle_path is not None:
+        raise ValueError("Choose checkpoint or model bundle, not both.")
+    if checkpoint is not None or bundle_path is not None:
+        if normalized not in rvm_models:
+            raise ValueError("Checkpoint and model bundle options are only supported by RVM.")
+    if checkpoint is not None:
+        path = Path(checkpoint)
+        if not path.is_file() or path.stat().st_size == 0:
+            raise ValueError(f"Checkpoint is missing or empty: {path}")
+    if bundle_path is not None and not Path(bundle_path).is_dir():
+        raise ValueError(f"Model bundle directory does not exist: {bundle_path}")
+    if downsample_ratio == "auto":
+        return "auto"
+    try:
+        ratio = float(downsample_ratio)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("downsample_ratio must be 'auto' or a number in (0, 1].") from exc
+    if isinstance(downsample_ratio, bool) or not math.isfinite(ratio) or not 0 < ratio <= 1:
+        raise ValueError("downsample_ratio must be 'auto' or a number in (0, 1].")
+    return ratio
 
 
 def config_int(config: dict[str, Any], path: str, default: int) -> int:

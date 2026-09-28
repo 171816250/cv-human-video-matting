@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+from threading import RLock
 
 import cv2
 import numpy as np
@@ -10,9 +12,27 @@ import torch
 
 from cv_human_video_matting.matting.base import MattingResult
 
-# Pinned torch.hub reference for Robust Video Matting. Shared so pre-download
-# tooling (scripts/download_models.py) caches exactly the ref loaded at runtime.
+# Explicit upstream branch reference, not an immutable commit. Shared so
+# download tooling and the runtime select the same torch hub cache directory.
 RVM_HUB_REF = "PeterL1n/RobustVideoMatting:master"
+_MODEL_IMPORT_LOCK = RLock()
+
+
+def _load_bundle_model(bundle, model_name):
+    # RVM imports a top-level `model` package. Keep a previously loaded cache or
+    # another bundle from silently supplying the code for this verified bundle.
+    with _MODEL_IMPORT_LOCK:
+        previous = {name: module for name, module in sys.modules.copy().items()
+                    if name == "model" or name.startswith("model.")}
+        for name in previous:
+            sys.modules.pop(name, None)
+        try:
+            return torch.hub.load(bundle["code_path"], model_name, source="local", pretrained=False)
+        finally:
+            for name in list(sys.modules):
+                if name == "model" or name.startswith("model."):
+                    sys.modules.pop(name, None)
+            sys.modules.update(previous)
 
 
 class RVMRunner:
@@ -22,6 +42,7 @@ class RVMRunner:
         checkpoint: str | Path | None = None,
         device: str = "cpu",
         downsample_ratio: float | str = 1.0,
+        bundle_path: str | Path | None = None,
     ) -> None:
         self.device = torch.device(device)
         self.downsample_ratio = (
@@ -29,18 +50,27 @@ class RVMRunner:
         )
         if self.downsample_ratio != "auto" and not 0 < self.downsample_ratio <= 1:
             raise ValueError("downsample_ratio must be 'auto' or in (0, 1].")
+        if bundle_path is not None and checkpoint is not None:
+            raise ValueError("RVM bundle_path and checkpoint cannot be configured together.")
         checkpoint_path = Path(checkpoint) if checkpoint is not None else None
         if checkpoint_path is not None and not checkpoint_path.is_file():
             raise FileNotFoundError(f"RVM checkpoint does not exist or is not a file: {checkpoint_path}")
-        self.model = torch.hub.load(
-            RVM_HUB_REF,
-            model_name,
-            pretrained=checkpoint_path is None,
-            trust_repo=True,
-        )
-        if checkpoint_path is not None:
-            state = torch.load(str(checkpoint_path), map_location=self.device)
+        self.bundle_info = None
+        if bundle_path is not None:
+            from cv_human_video_matting.utils.model_bundle import verify_model_bundle
+            self.bundle_info = verify_model_bundle(bundle_path, expected_model=model_name)
+            self.model = _load_bundle_model(self.bundle_info, model_name)
+            state = torch.load(self.bundle_info["weights_file"], map_location=self.device,
+                               weights_only=True)
             self.model.load_state_dict(state)
+        else:
+            with _MODEL_IMPORT_LOCK:
+                self.model = torch.hub.load(
+                    RVM_HUB_REF, model_name, pretrained=checkpoint_path is None, trust_repo=True,
+                )
+            if checkpoint_path is not None:
+                state = torch.load(str(checkpoint_path), map_location=self.device)
+                self.model.load_state_dict(state)
         self.model = self.model.to(self.device).eval()
         self._rec = [None, None, None, None]
         self._frame_shape = None

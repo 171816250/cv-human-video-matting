@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 from pathlib import Path
 import shutil
@@ -13,7 +14,7 @@ import cv2
 import numpy as np
 
 from cv_human_video_matting.depth import DepthEstimator, draw_distance_label
-from cv_human_video_matting.io.video import probe_video
+from cv_human_video_matting.io.video import VideoInfo, probe_video
 from cv_human_video_matting.matting.base import MattingRunner
 from cv_human_video_matting.postprocess import TemporalAlphaSmoother, refine_alpha
 from cv_human_video_matting.render.compositor import (
@@ -37,6 +38,16 @@ class PipelineStats:
     frames: int
     elapsed_seconds: float
     fps: float
+
+
+@dataclass(frozen=True)
+class PreparedVideoRequest:
+    """Read-only preflight results; no model or output resources are acquired."""
+
+    info: VideoInfo
+    output_path: Path
+    background_bgr: np.ndarray | None
+    total_frames: int | None
 
 
 def _load_background(path: str | Path | None):
@@ -237,6 +248,108 @@ def _video_frame_size(frame: np.ndarray, resize_short: int | None) -> tuple[int,
     return max(2, int(width * scale) // 2 * 2), max(2, int(height * scale) // 2 * 2)
 
 
+def _verify_written_frame_count(path: Path, expected: int) -> None:
+    """Verify the closed output container instead of trusting VideoWriter.write()."""
+    capture = cv2.VideoCapture(str(path))
+    try:
+        if not capture.isOpened():
+            raise RuntimeError(f"Written video could not be reopened for verification: {path}")
+        actual = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+        if not math.isfinite(actual) or actual != expected:
+            raise RuntimeError(
+                f"Written video frame count mismatch: expected {expected}, found {actual}; "
+                f"check available disk space and the video encoder: {path}"
+            )
+    finally:
+        capture.release()
+
+
+def validate_video_request(
+    input_path: str | Path,
+    output_path: str | Path,
+    mode: str,
+    max_frames: int | None = None,
+    background_path: str | Path | None = None,
+    edge_feather: int = 0,
+    mask_open: int = 0,
+    mask_close: int = 0,
+    temporal_smooth: bool = False,
+    temporal_blend: float = 0.75,
+    enable_depth: bool = False,
+    depth_interval: int = 5,
+    resize_short: int | None = None,
+    depth_model: str = "MiDaS_small",
+    depth_near: float = 0.66,
+    depth_mid: float = 0.33,
+    background_color_bgr: tuple[int, int, int] = (0, 255, 0),
+    temporal_mode: str = "ema",
+    temporal_motion_threshold: float = 0.15,
+) -> PreparedVideoRequest:
+    """Validate shared CLI/UI processing options before loading any model.
+
+    Probe the input and read the optional background, but never create output
+    directories or initialize inference models. ``output_path`` in the return
+    value is the resolved PNG sequence destination for transparent mode.
+    The video metadata proves the container can be opened; completeness is
+    checked during decoding by ``process_video``.
+    """
+    if not isinstance(mode, str) or mode not in {
+        "alpha", "green", "foreground", "blur", "transparent", "image", "side_by_side",
+    }:
+        raise ValueError(f"Unsupported render mode: {mode}")
+    if max_frames is not None and (
+        isinstance(max_frames, bool) or not isinstance(max_frames, int) or max_frames <= 0
+    ):
+        raise ValueError("max_frames must be a positive integer or None.")
+    validate_project_config({
+        "input": {"resize_short": resize_short},
+        "postprocess": {
+            "enable_temporal_smooth": temporal_smooth, "temporal_alpha": temporal_blend,
+            "edge_feather": edge_feather, "mask_open": mask_open, "mask_close": mask_close,
+            "temporal_mode": temporal_mode, "temporal_motion_threshold": temporal_motion_threshold,
+        },
+        "depth": {
+            "enabled": enable_depth, "model": depth_model, "interval": depth_interval,
+            "thresholds": {"near": depth_near, "mid": depth_mid},
+        },
+    })
+    _validate_background_color(background_color_bgr)
+    requested_output = Path(output_path)
+    source = Path(input_path)
+    if (source.resolve() == requested_output.resolve()
+            or (source.exists() and requested_output.exists()
+                and source.samefile(requested_output))):
+        raise ValueError("Input and output paths must be different.")
+    output = (
+        _transparent_output_dir(requested_output) if mode == "transparent" else requested_output
+    )
+    if source.resolve() == output.resolve():
+        raise ValueError("Input and output paths must be different.")
+    if mode == "transparent":
+        _prepare_png_sequence_dir(output)
+    elif output.exists() and not output.is_file():
+        raise ValueError(f"Video output path is not a file: {output}")
+    for parent in output.parents:
+        if parent.exists() and not parent.is_dir():
+            raise ValueError(f"Output parent is not a directory: {parent}")
+    background_bgr = _load_background(background_path)
+    if mode == "image" and background_bgr is None:
+        raise ValueError("Render mode 'image' requires a background image.")
+    info = probe_video(input_path)
+    if (
+        not math.isfinite(info.fps) or info.fps <= 0
+        or not math.isfinite(info.width) or info.width <= 0
+        or not math.isfinite(info.height) or info.height <= 0
+    ):
+        raise ValueError(
+            f"Input video has invalid dimensions or frame rate; verify/re-encode source: {info.path}"
+        )
+    total_frames = info.frame_count if info.frame_count > 0 else None
+    if total_frames is not None and max_frames is not None:
+        total_frames = min(total_frames, max_frames)
+    return PreparedVideoRequest(info, output, background_bgr, total_frames)
+
+
 def process_video(
     input_path: str | Path,
     output_path: str | Path,
@@ -259,6 +372,8 @@ def process_video(
     background_color_bgr: tuple[int, int, int] = (0, 255, 0),
     progress_callback: ProgressCallback | None = None,
     should_cancel: CancelCallback | None = None,
+    temporal_mode: str = "ema",
+    temporal_motion_threshold: float = 0.15,
 ) -> PipelineStats:
     """Process video with per-frame progress and cooperative cancellation.
 
@@ -270,35 +385,24 @@ def process_video(
     # Validate before opening a writer or modifying an existing output.
     started_at = perf_counter()
     check_cancelled(should_cancel)
-    if mode not in {"alpha", "green", "foreground", "blur", "transparent", "image", "side_by_side"}:
-        raise ValueError(f"Unsupported render mode: {mode}")
-    if max_frames is not None and (
-        isinstance(max_frames, bool) or not isinstance(max_frames, int) or max_frames <= 0
-    ):
-        raise ValueError("max_frames must be a positive integer or None.")
-    validate_project_config({
-        "input": {"resize_short": resize_short},
-        "postprocess": {"temporal_alpha": temporal_blend, "edge_feather": edge_feather,
-                        "mask_open": mask_open, "mask_close": mask_close},
-        "depth": {"model": depth_model, "thresholds": {"near": depth_near, "mid": depth_mid},
-                  "interval": depth_interval if enable_depth else 1},
-    })
-    _validate_background_color(background_color_bgr)
-    requested_output = Path(output_path)
-    if Path(input_path).resolve() == requested_output.resolve():
-        raise ValueError("Input and output paths must be different.")
-    background_bgr = _load_background(background_path)
-    if mode == "image" and background_bgr is None:
-        raise ValueError("Render mode 'image' requires a background image.")
-    info = probe_video(input_path)
-    total_frames = info.frame_count if info.frame_count > 0 else None
-    if total_frames is not None and max_frames is not None:
-        total_frames = min(total_frames, max_frames)
+    prepared = validate_video_request(
+        input_path, output_path, mode, max_frames=max_frames, background_path=background_path,
+        edge_feather=edge_feather, mask_open=mask_open, mask_close=mask_close,
+        temporal_smooth=temporal_smooth, temporal_blend=temporal_blend,
+        enable_depth=enable_depth, depth_interval=depth_interval, resize_short=resize_short,
+        depth_model=depth_model, depth_near=depth_near, depth_mid=depth_mid,
+        background_color_bgr=background_color_bgr, temporal_mode=temporal_mode,
+        temporal_motion_threshold=temporal_motion_threshold,
+    )
+    info, output = prepared.info, prepared.output_path
+    total_frames, background_bgr = prepared.total_frames, prepared.background_bgr
     if progress_callback is not None:
         progress_callback(0, total_frames)
     check_cancelled(should_cancel)
     temporal_smoother = (
-        TemporalAlphaSmoother(blend=temporal_blend) if temporal_smooth else None
+        TemporalAlphaSmoother(blend=temporal_blend, mode=temporal_mode,
+                             motion_threshold=temporal_motion_threshold)
+        if temporal_smooth else None
     )
     depth_estimator = (
         DepthEstimator(device=device, model_type=depth_model,
@@ -309,12 +413,7 @@ def process_video(
     reset = getattr(runner, "reset", None)
     if callable(reset):
         reset()
-    output = (
-        _transparent_output_dir(requested_output) if mode == "transparent" else requested_output
-    )
     check_cancelled(should_cancel)
-    if mode == "transparent":
-        _prepare_png_sequence_dir(output)
     capture = cv2.VideoCapture(str(info.path))
     writer = None
     staging = None
@@ -367,9 +466,10 @@ def process_video(
                 if mode != "transparent":
                     ensure_parent_dir(output)
                     height, width = rendered.shape[:2]
+                    codec = "FFV1" if output.suffix.lower() == ".mkv" else "mp4v"
                     writer = cv2.VideoWriter(
-                        str(output), cv2.VideoWriter_fourcc(*"mp4v"),
-                        info.fps if info.fps > 0 else 30.0, (width, height),
+                        str(output), cv2.VideoWriter_fourcc(*codec),
+                        info.fps, (width, height),
                     )
                     if not writer.isOpened():
                         raise ValueError(f"Failed to open output video writer: {output}")
@@ -385,6 +485,12 @@ def process_video(
         check_cancelled(should_cancel)
         if processed == 0:
             raise ValueError(f"Input video has no readable frames: {info.path}")
+        if total_frames is not None and processed < total_frames:
+            raise ValueError(
+                f"Input video decoding ended early: decoded {processed} of {total_frames} "
+                f"expected frames. This may indicate truncated decoding or inaccurate "
+                f"frame-count metadata; verify/re-encode source: {info.path}"
+            )
         if staging is not None:
             _commit_png_sequence(Path(staging.name), output, should_cancel)
     finally:
@@ -393,6 +499,9 @@ def process_video(
             writer.release()
         if staging is not None:
             staging.cleanup()
+    if mode != "transparent":
+        check_cancelled(should_cancel)
+        _verify_written_frame_count(output, processed)
     elapsed = perf_counter() - started_at
     return PipelineStats(
         output_path=output, frames=processed, elapsed_seconds=elapsed,

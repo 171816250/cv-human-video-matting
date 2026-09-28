@@ -72,6 +72,21 @@ def _protect_paths(target: Path, sources) -> None:
             raise ValueError(f"Report path aliases an existing input or output: {source}")
 
 
+def validate_artifact_paths(report_path, input_path, output_path, asset_paths=()) -> None:
+    """Reject publication paths that could overwrite inputs or model resources."""
+    output = Path(output_path)
+    sources = [Path(input_path), *(Path(item) for item in asset_paths if item)]
+    # Directories such as verified model bundles protect their whole subtree.
+    _protect_paths(output, sources)
+    if report_path is not None:
+        report = Path(report_path)
+        if report.suffix.lower() != ".json":
+            raise ValueError("Report path must use the .json extension.")
+        if report.is_dir():
+            raise ValueError(f"Report path is an existing directory: {report}")
+        _protect_paths(report, (*sources, output))
+
+
 def _code_provenance() -> dict:
     root = Path(__file__).resolve().parents[2]
     code = {"version": __version__, "git_commit": None, "git_dirty": None,
@@ -143,14 +158,18 @@ def _environment(device: str) -> dict:
     }
 
 
-def _video_metadata(info) -> dict:
+def _video_metadata(info, allow_unknown_frames=False) -> dict:
     if (
-        info.width <= 0 or info.height <= 0 or info.frame_count <= 0
+        info.width <= 0 or info.height <= 0 or (info.frame_count <= 0 and not allow_unknown_frames)
         or not math.isfinite(info.fps) or info.fps <= 0
     ):
         raise ValueError(f"Video has invalid dimensions, frame count, or FPS: {info.path}")
-    return {"width": info.width, "height": info.height, "fps": info.fps,
-            "frame_count": info.frame_count, "duration_seconds": info.duration_seconds}
+    metadata = {"width": info.width, "height": info.height, "fps": info.fps,
+                "frame_count": info.frame_count, "duration_seconds": info.duration_seconds}
+    if info.frame_count <= 0:
+        metadata.update(frame_count=None, duration_seconds=None,
+            completeness="Source frame count unavailable; full decode completeness is unverified.")
+    return metadata
 
 
 def _output_metadata(path: Path, source_fps: float) -> dict:
@@ -187,7 +206,7 @@ def _output_metadata(path: Path, source_fps: float) -> dict:
 
 
 def write_run_report(path, input_path, stats: PipelineStats, options: dict, total_seconds: float,
-                     export_seconds: float = 0.0, published_output_path=None):
+                     export_seconds: float = 0.0, published_output_path=None, model_bundle_info=None):
     """Write measured throughput and hashes without implying matting quality scores.
 
     ``total_seconds`` remains the caller's measurement ending after delivery export.
@@ -200,6 +219,9 @@ def write_run_report(path, input_path, stats: PipelineStats, options: dict, tota
     published_output = Path(published_output_path) if published_output_path is not None else output
     if target.suffix.lower() != ".json":
         raise ValueError("Report path must use the .json extension.")
+    assets_paths = [options.get(name) for name in ("checkpoint", "background", "model_bundle")]
+    validate_artifact_paths(target, source, output, assets_paths)
+    validate_artifact_paths(target, source, published_output, assets_paths)
     _protect_paths(target, (source, output, published_output))
     if published_output_path is not None:
         _protect_paths(published_output, (source, target))
@@ -218,11 +240,25 @@ def write_run_report(path, input_path, stats: PipelineStats, options: dict, tota
         if options.get(name):
             asset = Path(options[name])
             assets[name] = {"path": str(asset), **_file_record(asset)}
+    if options.get("model_bundle"):
+        from cv_human_video_matting.utils.model_bundle import verify_model_bundle
+
+        bundle = verify_model_bundle(options["model_bundle"])
+        if model_bundle_info is not None:
+            if (model_bundle_info.get("content_sha256") != bundle["content_sha256"]
+                    or model_bundle_info.get("model_name") != bundle["model_name"]):
+                raise ValueError("Model bundle changed after model initialization; report was not published.")
+        weights = next(item for item in bundle["files"] if item["path"] == bundle["weights_path"])
+        assets["model_bundle"] = {
+            "model_name": bundle["model_name"], "content_sha256": bundle["content_sha256"],
+            "weights": weights, "load_identity_confirmed": model_bundle_info is not None,
+            "integrity_scope": "Local byte identity; not an upstream signature or quality guarantee.",
+        }
     report = {
         "schema_version": 3, "kind": "run_report",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "code": _code_provenance(),
-        "input": {"path": str(source), **_file_record(source), **_video_metadata(info)},
+        "input": {"path": str(source), **_file_record(source), **_video_metadata(info, allow_unknown_frames=True)},
         "output": _output_metadata(output, info.fps),
         "assets": assets, "options": options,
         "environment": _environment(str(options.get("device", "unknown"))),
@@ -231,7 +267,7 @@ def write_run_report(path, input_path, stats: PipelineStats, options: dict, tota
                    "total_fps": stats.frames / total_seconds if total_seconds > 0 else 0.0},
         "timing_scope": {
             "elapsed_seconds": "Video pipeline including first frame, I/O, depth initialization and writer close; excludes matting model loading.",
-            "total_seconds": "Matting model loading, video pipeline and delivery export; excludes metadata collection and JSON report generation.",
+            "total_seconds": "Matting model loading, video pipeline and delivery export; excludes metadata collection, JSON report generation and final publication/copy/rollback preparation.",
             "export_seconds": "Delivery video encoding/audio merge or transparent archive packaging.",
             "metadata_seconds": "Additional code/version collection, artifact hashing and media probing; excludes JSON serialization and disk write. Not included in total_seconds.",
         },

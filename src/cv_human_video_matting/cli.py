@@ -71,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
                               default=None, help="Keep original audio in MP4 output (default: on).")
     matte_parser.add_argument("--downsample-ratio", default=None,
                               help="RVM inference scale: auto or a number in (0, 1].")
+    matte_parser.add_argument("--model-bundle", help="Verified offline RVM code and weights directory.")
+    matte_parser.add_argument("--temporal-mode", choices=["ema", "adaptive"],
+                              help="Smoothing method; adaptive reduces history at changing edges.")
+    matte_parser.add_argument("--temporal-motion-threshold", type=float,
+                              help="Normalized alpha change threshold in (0, 1], default 0.15.")
     matte_parser.add_argument(
         "--output",
         required=True,
@@ -131,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--temporal-smooth",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Enable simple exponential smoothing over alpha frames.",
+        help="Enable temporal smoothing over alpha frames (off by default).",
     )
     matte_parser.add_argument(
         "--temporal-blend",
@@ -194,9 +199,10 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Evaluation summary: {write_evaluation_summary(paths, args.output)}")
         return
     from cv_human_video_matting.io.video import copy_video, probe_video, export_video_for_delivery
-    from cv_human_video_matting.pipeline import process_video
+    from cv_human_video_matting.pipeline import process_video, validate_video_request
     from cv_human_video_matting.utils.config import (
         config_bool, config_float, config_int, config_value, load_config, parse_background_color,
+        validate_model_settings,
     )
     from cv_human_video_matting.utils.device import resolve_device
     config = load_config(args.config)
@@ -220,8 +226,11 @@ def main(argv: list[str] | None = None) -> None:
             parser.error("Report path must differ from input and output paths.")
         model = args.model or config_value(config, "matting.model", "rvm_mobilenetv3")
         checkpoint = args.checkpoint
-        if checkpoint is None and model == config_value(config, "matting.model", "rvm_mobilenetv3"):
-            checkpoint = config_value(config, "matting.checkpoint")
+        bundle_path = args.model_bundle
+        if checkpoint is None and bundle_path is None:
+            if model == config_value(config, "matting.model", "rvm_mobilenetv3"):
+                checkpoint = config_value(config, "matting.checkpoint")
+                bundle_path = config_value(config, "matting.bundle")
         requested_device = args.device or config_value(config, "device.mode", "auto")
         device = resolve_device(requested_device)
         mode = args.mode or config_value(config, "render.mode", "green")
@@ -273,19 +282,43 @@ def main(argv: list[str] | None = None) -> None:
             if args.depth_interval is not None
             else config_int(config, "depth.interval", 5)
         )
+        temporal_mode = args.temporal_mode or config_value(config, "postprocess.temporal_mode", "adaptive")
+        temporal_motion_threshold = (args.temporal_motion_threshold
+            if args.temporal_motion_threshold is not None
+            else config_float(config, "postprocess.temporal_motion_threshold", 0.15))
+        downsample_ratio = validate_model_settings(model, checkpoint, bundle_path,
+            args.downsample_ratio if args.downsample_ratio is not None
+            else config_value(config, "matting.downsample_ratio", "auto"))
+        prepared = validate_video_request(
+            input_path=args.input, output_path=args.output, mode=mode,
+            max_frames=args.max_frames, background_path=args.background,
+            edge_feather=edge_feather, mask_open=mask_open, mask_close=mask_close,
+            temporal_smooth=temporal_smooth, temporal_blend=temporal_blend,
+            temporal_mode=temporal_mode, temporal_motion_threshold=temporal_motion_threshold,
+            enable_depth=enable_depth, depth_interval=depth_interval, resize_short=resize_short,
+            depth_model=depth_model, depth_near=depth_near, depth_mid=depth_mid,
+            background_color_bgr=color_bgr,
+        )
+        from cv_human_video_matting.reporting import validate_artifact_paths
+        from cv_human_video_matting.utils.publication import PublicationItem, publish_artifacts
+
+        destination = prepared.output_path
+        validate_artifact_paths(
+            args.report, args.input, destination,
+            asset_paths=[path for path in (checkpoint, args.background, bundle_path) if path],
+        )
         started_at = perf_counter()
-        downsample_ratio = args.downsample_ratio or config_value(config, "matting.downsample_ratio", "auto")
         runner = create_matting_runner(
             model=model,
             checkpoint=checkpoint,
             device=device,
             downsample_ratio=downsample_ratio,
+            bundle_path=bundle_path,
         )
-        # Keep any existing delivery file intact until processing and encoding succeed.
-        destination = Path(args.output)
+        # Prepare media and its requested report before replacing either artifact.
         destination.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix=".matting-", dir=destination.parent) as staging:
-            pipeline_output = destination if mode == "transparent" else Path(staging) / "frames.mp4"
+            pipeline_output = Path(staging) / ("transparent.mp4" if mode == "transparent" else "frames.mkv")
             stats = process_video(
                 input_path=args.input,
                 output_path=pipeline_output,
@@ -298,6 +331,8 @@ def main(argv: list[str] | None = None) -> None:
                 mask_close=mask_close,
                 temporal_smooth=temporal_smooth,
                 temporal_blend=temporal_blend,
+                temporal_mode=temporal_mode,
+                temporal_motion_threshold=temporal_motion_threshold,
                 enable_depth=enable_depth,
                 depth_interval=depth_interval,
                 device=device,
@@ -310,31 +345,49 @@ def main(argv: list[str] | None = None) -> None:
             )
             export_started = perf_counter()
             if mode != "transparent":
-                delivered = export_video_for_delivery(stats.output_path, destination,
+                delivered = export_video_for_delivery(stats.output_path, Path(staging) / "delivery.mp4",
                     source_path=args.input, preserve_audio=preserve_audio)
                 stats = replace(stats, output_path=delivered)
             export_seconds = perf_counter() - export_started
-        total_seconds = perf_counter() - started_at
-        if args.report:
-            from cv_human_video_matting.reporting import write_run_report
+            total_seconds = perf_counter() - started_at
+            staged_report = None
+            if args.report:
+                from cv_human_video_matting.reporting import write_run_report
 
-            report = write_run_report(args.report, args.input, stats, {
-                "model": model, "checkpoint": checkpoint, "device": device, "mode": mode,
-                "downsample_ratio": downsample_ratio,
-                "max_frames": args.max_frames, "background": args.background,
-                "edge_feather": edge_feather, "mask_open": mask_open, "mask_close": mask_close,
-                "temporal_smooth": temporal_smooth, "temporal_blend": temporal_blend,
-                "enable_depth": enable_depth, "depth_interval": depth_interval,
-                "depth_model": depth_model, "depth_near": depth_near, "depth_mid": depth_mid,
-                "resize_short": resize_short, "background_color": background_color,
-                "preserve_audio": preserve_audio and mode != "transparent",
-            }, total_seconds, export_seconds=export_seconds)
-            print(f"Run report: {report}")
+                staged_report = write_run_report(Path(staging) / "run.json", args.input, stats, {
+                    "model": model, "checkpoint": checkpoint, "device": device, "mode": mode,
+                    "model_bundle": str(bundle_path) if bundle_path is not None else None,
+                    "downsample_ratio": downsample_ratio,
+                    "max_frames": args.max_frames, "background": args.background,
+                    "edge_feather": edge_feather, "mask_open": mask_open, "mask_close": mask_close,
+                    "temporal_smooth": temporal_smooth, "temporal_blend": temporal_blend,
+                    "temporal_mode": temporal_mode, "temporal_motion_threshold": temporal_motion_threshold,
+                    "intermediate_codec": "PNG" if mode == "transparent" else "FFV1",
+                    "enable_depth": enable_depth, "depth_interval": depth_interval,
+                    "depth_model": depth_model, "depth_near": depth_near, "depth_mid": depth_mid,
+                    "resize_short": resize_short, "background_color": background_color,
+                    "preserve_audio": preserve_audio and mode != "transparent",
+                }, total_seconds, export_seconds=export_seconds, published_output_path=destination,
+                    model_bundle_info=getattr(runner, "bundle_info", None))
+            if mode == "transparent" and destination.exists():
+                # Preserve user notes in an existing sequence directory. Every
+                # newly added frame is exclusive and can be rolled back alone.
+                artifacts = [PublicationItem(path, destination / path.name, replace_existing=False)
+                             for path in sorted(stats.output_path.glob("frame_*.png"))]
+            else:
+                artifacts = [PublicationItem(stats.output_path, destination,
+                                             replace_existing=mode != "transparent")]
+            if staged_report is not None:
+                artifacts.append(PublicationItem(staged_report, Path(args.report)))
+            publish_artifacts(artifacts)
+            stats = replace(stats, output_path=destination)
+        if args.report:
+            print(f"Run report: {args.report}")
         print(f"Matting output: {stats.output_path}")
         print(f"Model: {model}")
         print(f"Mode: {mode}")
         print(f"Device: {device}")
-        print(f"Total including model loading and export: {total_seconds:.3f}s")
+        print(f"Total including model loading and export (excludes final publication): {total_seconds:.3f}s")
         print(
             f"Processed {stats.frames} frame(s) in {stats.elapsed_seconds:.3f}s "
             f"({stats.fps:.2f} FPS)."

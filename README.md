@@ -4,7 +4,7 @@
 
 当前处于答辩候选版本准备阶段。工程测试、真实模型运行和真人素材效果评估分别记录，不以短片冒烟测试推导持续实时性能。
 
-当前候选版本为 **0.2.0rc1**：新增逐帧进度、按浏览器会话停止处理、可下载的版本/文件校验报告、中文评测汇总，以及可校验的自动打包工具。
+当前候选版本为 **0.2.0rc2**：支持可校验的RVM离线模型包、自适应时间平滑、无损中间视频；增加处理前预检、提前解码结束检查，以及媒体和报告发布失败时的回滚。上版进度、停止、运行报告和中文评测汇总继续保留。
 
 ## 快速开始
 
@@ -41,17 +41,35 @@ python -B app.py ui --host 127.0.0.1 --port 7860 --no-share
 | 能力 | 说明 |
 | --- | --- |
 | 七种渲染模式 | green纯色、image图片、blur虚化、alpha遮罩、foreground黑底前景、side_by_side对比、transparent透明PNG |
-| 视频交付 | H.264/yuv420p MP4，保留原视频首条音轨并转AAC；无音轨视频正常处理 |
+| 视频交付 | FFV1无损中间文件，再导出H.264/yuv420p MP4；保留原视频首条音轨并转AAC |
 | 截取与声音 | --max-frames限制帧数，音频随输出时长截断；--no-preserve-audio去掉声音 |
-| 失败保护 | CLI临时视频成功导出后替换MP4；网页将媒体与报告整体保存到独立任务目录，失败或停止时清理本次暂存文件 |
-| 后处理 | 边缘羽化、形态学开闭、时间平滑；过强平滑可能拖影 |
+| 失败保护 | 建模前预检参数与输入；CLI先生成媒体与报告再发布，常规失败回滚旧结果；网页按完整任务目录发布 |
+| 后处理 | 边缘羽化、形态学开闭、EMA/自适应时间平滑；默认关闭，自适应减少变化边缘的历史残留 |
 | 相对距离 | MiDaS，可配置模型、阈值和刷新间隔；Near/Mid/Far不是米数 |
-| 环境检查 | doctor检查依赖、设备、FFmpeg编码器和缓存，不下载模型 |
+| 环境检查 | doctor核对依赖版本要求、设备、编码器、FFV1实际写读和离线包/缓存，不下载模型 |
+| 离线模型 | 从已有缓存导出RVM源码、权重与LICENSE，加载前逐文件校验；运行报告记录内容身份 |
 | 运行记录 | CLI使用--report；网页可下载result.json，记录版本、源码/文件SHA256、实际输出尺寸及处理/导出耗时 |
 
 网页任务存放在 `data/output/gradio_时间_标识_模式/`，视频为 `result.mp4`，报告为 `result.json`；透明模式包含帧目录与ZIP。`paths.output_dir`可更改保存位置。网页推理任务依次运行以减少显存争用；停止按钮针对已开始的当前任务，排队任务暂不能撤回。
 
 默认配置为 `configs/default.yaml`。额外配置使用 `python app.py --config 文件路径 matte ...`。布尔值写YAML的true/false，颜色写带引号的HEX字符串。显式指定不存在的RVM检查点会报错，未指定时使用预训练缓存。
+
+只有`auto`会自动选择CPU；显式指定`cuda`但GPU不可用时会提示错误。源视频已知帧数却提前解码结束时不发布截短结果；元数据帧数未知时允许读到末尾，但报告明确标记完整性未核验。视频按输入名义帧率写出，变帧率素材应先统一帧率并检查音画同步。
+
+## 离线演示与时间平滑
+
+已有RVM缓存时，可生成独立模型包，并在空缓存、Python网络请求拦截下试运行：
+
+```bash
+python -B scripts/prepare_offline_model.py --output weights/offline/rvm-mobilenetv3
+python -B scripts/rehearse_offline.py --bundle weights/offline/rvm-mobilenetv3 --input data/input/demo.mp4 --output-dir data/output/offline-rehearsal --device auto
+```
+
+网页需在配置中设置`matting.bundle`，CLI也可用`--model-bundle`指定。离线包不包含运行环境、CUDA驱动或MiDaS。导出和试运行目录必须是新目录，避免覆盖；详细步骤见[离线部署说明](docs/OFFLINE_MODEL.md)。
+
+网页的时间平滑默认关闭。开启时可选择“自适应”或传统EMA；CLI使用`--temporal-smooth --temporal-mode adaptive --temporal-motion-threshold 0.15`。阈值按0–1归一化alpha变化量计算；较小值更快放弃历史，也可能减少降噪作用。这是局部alpha变化启发式，真人发丝、遮挡和快速动作仍需同素材评估。
+
+无损中间文件通常大于最终MP4，需预留临时磁盘空间。最终H.264仍为有损编码；此次改进消除的是中间一步的额外有损压缩。
 
 ## 可复现操作
 
@@ -94,10 +112,12 @@ python -B -m pytest -q --cov=cv_human_video_matting --cov-report=term --cov-repo
 在代码已提交且无已跟踪文件修改时，生成本地候选包：
 
 ```bash
-python scripts/package_release.py --output-dir ../deliverables/v0.2.0rc1 --evidence data/output/benchmark --evidence coverage.xml
+python scripts/package_release.py --output-dir ../deliverables/v0.2.0rc2 --evidence data/output/benchmark --evidence coverage.xml
 ```
 
 目标目录必须尚不存在。工具从Git提交打包源码，附明确指定的证据、可恢复的Git历史、SHA256清单与使用说明；不会自动收录未跟踪文件、模型权重或整个运行环境。候选包不等于远端正式Release。
+
+如需附上已准备的离线模型包，可另加`--evidence weights/offline/rvm-mobilenetv3`，其文件也会逐一纳入外置清单；同时保留模型包内原始LICENSE和清单。
 
 离线测试使用模型替身与本地合成音视频，不下载权重。GitHub Actions仅在对应平台触发，Gitee托管不代表此工作流已运行。
 

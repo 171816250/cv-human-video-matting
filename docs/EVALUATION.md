@@ -17,7 +17,7 @@ RVM的 `--downsample-ratio auto` 使用 `min(1, 512 / 输入长边)` 作为内�
 比较模型时应保持该参数一致。小于等于512像素长边的输入不会自动缩小。
 
 - `elapsed_seconds` / `fps`：视频处理流程，包括首帧、视频读写、深度模型初始化和资源释放；不包含抠像模型加载。
-- `total_seconds` / `total_fps`：模型加载加完整处理及交付导出，不包含报告生成。
+- `total_seconds` / `total_fps`：模型加载加完整处理及交付导出，不包含报告生成、最终发布复制及旧文件备份准备。
 - `export_seconds`：H.264转码/音频合并，或网页透明序列打包的耗时。
 - schema3的 `metadata_seconds`：额外版本识别、文件哈希与媒体信息采集时间，不包含在total_seconds中，也不包含JSON序列化与落盘。
 
@@ -26,6 +26,10 @@ RVM的 `--downsample-ratio auto` 使用 `min(1, 512 / 输入长边)` 作为内�
 ## 报告追溯与汇总
 
 schema3记录软件版本、Git提交与工作区状态、源码SHA256、输入/输出文件校验值、输出实际尺寸/帧率/帧数。透明PNG记录逐帧校验清单；帧序列时长按输入帧率解释。自定义背景与显式检查点另记录哈希。默认模型缓存/上游权重未自动核验，正式评测仍须固定并核验权重及机器负载。
+
+0.2.0rc2使用`--model-bundle`时，报告会保存实际加载的包内容SHA256与权重SHA256，并在报告生成前复验。缺少加载身份确认的离线包报告不进入严格分组。源帧数未知时，输入帧数与时长记为null，明确标记完整性未验证；处理输出仍记录实际帧数，该类报告单列为信息不足。
+
+EMA与自适应平滑的合成遮罩实验只验证算法对受控噪声、移动边界的行为，不能替代真人发丝质量。FFV1与mp4v中间编码的实验衡量编码失真，不等于抠像准确率；必须与抠像质量指标分开报告。
 
 ```bash
 python -B app.py summarize --reports "data/output/benchmark/run-*.json" --output data/output/benchmark/summary.html

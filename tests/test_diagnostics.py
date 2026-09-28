@@ -40,8 +40,18 @@ def environment(monkeypatch, tmp_path):
 
     def version(name):
         if name in state.versions:
-            raise state.versions[name]
-        return "1.2.3"
+            result = state.versions[name]
+            if isinstance(result, Exception):
+                raise result
+            return result
+        return {
+            "torch": "2.5.1", "torchvision": "0.20.1", "numpy": "1.26.4",
+            "opencv-python": "4.10.0.84", "pillow": "10.4.0", "pyyaml": "6.0.2",
+            "gradio": "4.37.2", "imageio-ffmpeg": "0.6.0", "transformers": "4.41.2",
+            "timm": "1.0.11", "safetensors": "0.4.5", "tqdm": "4.66.5", "pytest": "8.3.3",
+            "huggingface-hub": "0.23.2", "fastapi": "0.111.1", "starlette": "0.37.2",
+            "pydantic": "2.8.2",
+        }.get(name.lower(), "1.2.3")
 
     def load_config(path):
         if isinstance(state.config, Exception):
@@ -58,6 +68,7 @@ def environment(monkeypatch, tmp_path):
     monkeypatch.setattr(diagnostics.importlib, "import_module", import_module)
     monkeypatch.setattr(diagnostics, "version", version)
     monkeypatch.setattr(diagnostics.subprocess, "run", run)
+    monkeypatch.setattr(diagnostics, "_probe_ffv1", lambda cv2, np: "FFV1 round trip passed")
     monkeypatch.setattr(config_module, "load_config", load_config)
     monkeypatch.setattr(diagnostics.sys, "version_info", (3, 10, 0))
     return state
@@ -94,8 +105,9 @@ def test_broken_dependencies_are_reported_and_other_checks_continue(environment,
 def test_package_metadata_missing_does_not_prevent_import_check(environment):
     environment.versions["torch"] = diagnostics.PackageNotFoundError("torch")
     report = diagnostics.check_environment()
-    assert report["ready"]
+    assert not report["ready"]
     assert checks_by_name(report)["torch"]["detail"] == "version unavailable"
+    assert checks_by_name(report)["requirement:torch"]["status"] == "fail"
 
 
 @pytest.mark.parametrize("error", [FileNotFoundError("missing config"), ValueError("bad interval")])
@@ -250,3 +262,131 @@ def test_cli_help_and_doctor_work_without_site_packages(tmp_path):
     checks = checks_by_name(report)
     assert checks["torch"]["status"] == "fail"
     assert checks["config"]["status"] == "fail"
+
+
+@pytest.mark.parametrize("package,installed", [
+    ("numpy", "1.22.4"), ("opencv-python", "4.7.0.72"), ("pillow", "9.5.0"),
+    ("torch", "1.13.0+cu117"), ("gradio", "5.0.0"), ("numpy", "2.0.0"),
+])
+def test_importable_but_out_of_range_dependencies_make_doctor_fail(environment, package, installed):
+    environment.versions[package] = installed
+    report = diagnostics.check_environment()
+    checks = checks_by_name(report)
+    assert not report["ready"]
+    assert checks["requirement:" + package]["status"] == "fail"
+    assert installed in checks["requirement:" + package]["detail"]
+    assert checks["requirements"]["status"] == "fail"
+    assert checks["video-export"]["status"] == "pass"
+
+
+def test_requirements_include_constraints_are_combined_and_profile_is_recorded(environment, tmp_path):
+    base = tmp_path / "base.txt"
+    base.write_text("numpy>=1.24\n", encoding="utf-8")
+    profile = tmp_path / "demo.txt"
+    profile.write_text("-r base.txt\nnumpy<2\n", encoding="utf-8")
+    environment.versions["numpy"] = "1.23.5"
+    report = diagnostics.check_environment(requirements_path=profile)
+    checks = checks_by_name(report)
+    assert report["requirements_profile"] == str(profile.resolve())
+    assert checks["requirement:numpy"]["status"] == "fail"
+    assert "base.txt" in checks["requirement:numpy"]["detail"]
+    assert "demo.txt" in checks["requirement:numpy"]["detail"]
+
+
+def test_unavailable_requirements_file_does_not_claim_compatibility(environment, tmp_path):
+    report = diagnostics.check_environment(requirements_path=tmp_path / "missing.txt")
+    checks = checks_by_name(report)
+    assert not report["ready"]
+    assert checks["requirements"]["status"] == "fail"
+    assert "missing.txt" in checks["requirements"]["detail"]
+
+
+def test_cyclic_requirements_includes_are_rejected(environment, tmp_path):
+    profile = tmp_path / "cycle.txt"
+    profile.write_text("-r cycle.txt\n", encoding="utf-8")
+    checks = checks_by_name(diagnostics.check_environment(requirements_path=profile))
+    assert checks["requirements"]["status"] == "fail"
+    assert "Cyclic" in checks["requirements"]["detail"]
+
+
+def test_bundle_is_verified_even_without_torch_and_does_not_query_hub_cache(environment, monkeypatch):
+    from cv_human_video_matting.utils import model_bundle
+    environment.config = {"matting": {"model": "rvm_mobilenetv3", "bundle": "offline/rvm"},
+                          "depth": {"enabled": True}}
+    environment.errors["torch"] = ImportError("torch not installed")
+    calls = []
+
+    def verify(path, expected_model):
+        calls.append((path, expected_model))
+        return {"content_sha256": "a" * 64}
+
+    monkeypatch.setattr(model_bundle, "verify_model_bundle", verify)
+    checks = checks_by_name(diagnostics.check_environment())
+    assert calls == [("offline/rvm", "mobilenetv3")]
+    assert checks["model-bundle"]["status"] == "pass"
+    assert "model-cache" not in checks
+    assert "MiDaS" in checks["depth-model"]["detail"]
+    assert checks["torch"]["status"] == "fail"
+
+
+def test_valid_bundle_skips_broken_global_torch_hub_cache(environment, monkeypatch):
+    from cv_human_video_matting.utils import model_bundle
+    environment.config = {"matting": {"model": "rvm_resnet50", "bundle": "offline/resnet"}}
+
+    def no_global_cache():
+        pytest.fail("Bundle mode must not read the global torch hub cache.")
+
+    environment.torch.hub.get_dir = no_global_cache
+    monkeypatch.setattr(model_bundle, "verify_model_bundle",
+                        lambda path, expected_model: {"content_sha256": "b" * 64})
+    report = diagnostics.check_environment()
+    assert report["ready"]
+    assert checks_by_name(report)["model-bundle"]["status"] == "pass"
+    assert "model-cache" not in checks_by_name(report)
+
+
+def test_changed_bundle_is_a_failure_without_cache_fallback(environment, monkeypatch):
+    from cv_human_video_matting.utils import model_bundle
+    environment.config = {"matting": {"model": "rvm_mobilenetv3", "bundle": "changed"}}
+
+    def changed(*args, **kwargs):
+        raise ValueError("RVM bundle file hash/size mismatch: code/hubconf.py")
+
+    monkeypatch.setattr(model_bundle, "verify_model_bundle", changed)
+    report = diagnostics.check_environment()
+    checks = checks_by_name(report)
+    assert not report["ready"]
+    assert checks["model-bundle"]["status"] == "fail"
+    assert "hash/size mismatch" in checks["model-bundle"]["detail"]
+    assert "model-cache" not in checks
+
+
+def test_ffv1_error_is_recorded_even_when_export_encoder_exists(environment, monkeypatch):
+    def broken(cv2, np):
+        raise RuntimeError("FFV1 writer unavailable")
+
+    monkeypatch.setattr(diagnostics, "_probe_ffv1", broken)
+    report = diagnostics.check_environment()
+    checks = checks_by_name(report)
+    assert not report["ready"]
+    assert checks["lossless-intermediate"]["status"] == "fail"
+    assert checks["video-export"]["status"] == "pass"
+
+
+def test_actual_ffv1_matroska_round_trip():
+    import cv2
+    import numpy as np
+    assert "Matroska" in diagnostics._probe_ffv1(cv2, np)
+
+
+def test_ffv1_unavailable_writer_releases_resource():
+    import numpy as np
+    released = []
+    cv2 = SimpleNamespace(
+        VideoWriter_fourcc=lambda *args: 1,
+        VideoWriter=lambda *args: SimpleNamespace(isOpened=lambda: False,
+                                                  release=lambda: released.append(True)),
+    )
+    with pytest.raises(RuntimeError, match="FFV1/Matroska writer"):
+        diagnostics._probe_ffv1(cv2, np)
+    assert released == [True]
