@@ -1,0 +1,5 @@
+# GPU realtime profile. Install the matching CPU/CUDA Torch pair first.
+-r requirements-demo.txt
+fastapi>=0.111,<0.112
+uvicorn>=0.23.2,<1
+websockets>=11,<12

@@ -12,6 +12,7 @@ htmlcov/
 
 # Environments
 .venv/
+.venv-*/
 venv/
 env/
 .conda/

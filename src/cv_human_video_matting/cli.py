@@ -195,6 +195,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create a public Gradio share link.",
     )
 
+    realtime_parser = subparsers.add_parser("realtime", help="Start the local continuous camera workspace.")
+    realtime_parser.add_argument("--model-bundle", help="Verified local RVM bundle (required unless configured).")
+    realtime_parser.add_argument("--device", default=None, help="auto, cpu, cuda or cuda:N.")
+    realtime_parser.add_argument("--host", default="127.0.0.1")
+    realtime_parser.add_argument("--port", type=int, default=7861)
+    realtime_parser.add_argument("--trust-local-proxy", action="store_true",
+                                 help="Accept HTTPS proxy headers only from loopback; bind loopback only.")
+    realtime_parser.add_argument("--max-width", type=int, choices=[320, 640, 960, 1280], default=640)
+    realtime_parser.add_argument("--mode", choices=["green", "blur", "alpha", "foreground", "side_by_side"],
+                                 default="green")
+
     return parser
 
 
@@ -225,6 +236,30 @@ def main(argv: list[str] | None = None) -> None:
             paths.extend(matches)
         paths = list(dict.fromkeys(paths))
         print(f"Evaluation summary: {write_evaluation_summary(paths, args.output)}")
+        return
+    if args.command == "realtime":
+        from cv_human_video_matting.utils.config import load_config
+
+        if not 1 <= args.port <= 65535:
+            parser.error("Server port must be between 1 and 65535.")
+        if args.trust_local_proxy and args.host not in {"127.0.0.1", "::1", "localhost"}:
+            parser.error("--trust-local-proxy requires a loopback --host.")
+        config = load_config(args.config)
+        bundle = args.model_bundle or config.get("matting", {}).get("bundle")
+        if not bundle:
+            parser.error("Realtime requires --model-bundle or matting.bundle; no model is downloaded.")
+        config = config_with_model_bundle(config, bundle, select_model=args.model_bundle is not None)
+        from cv_human_video_matting.realtime.service import create_realtime_app
+        import uvicorn
+
+        application = create_realtime_app(
+            config["matting"]["bundle"], device=args.device or config.get("device", {}).get("mode", "auto"),
+            max_width=args.max_width, mode=args.mode,
+        )
+        print(f"Realtime workspace: http://{args.host}:{args.port}", flush=True)
+        proxy_options = {"forwarded_allow_ips": "127.0.0.1,::1"} if args.trust_local_proxy else {}
+        uvicorn.run(application, host=args.host, port=args.port, workers=1, proxy_headers=args.trust_local_proxy,
+                    ws_max_size=2 * 1024 * 1024, ws_max_queue=1, access_log=False, **proxy_options)
         return
     if args.command == "ui":
         from cv_human_video_matting.utils.config import load_config

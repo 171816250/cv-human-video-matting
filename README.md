@@ -4,7 +4,7 @@
 
 当前处于答辩候选版本准备阶段。工程测试、真实模型运行和真人素材效果评估分别记录，不以短片冒烟测试推导持续实时性能。
 
-当前候选版本为 **0.2.0rc3**：新增项目独立环境、一键离线启动、Windows CPU 完整运行依赖清单及真实网页验收脚本；基础演示与可选模型、测试依赖分别管理。保留离线模型校验、自适应平滑、无损中间视频、失败回滚与运行报告。
+当前候选版本为 **0.2.0rc4**：新增独立 GPU 实时 WebSocket 工作区、逐帧在途控制、浏览器摄像头/本地视频来源、实时 FPS 与延迟指标。基础批处理、CPU 独立环境、离线模型校验、自适应平滑、无损中间视频、失败回滚与运行报告继续保留。
 
 ## 快速开始
 
@@ -36,6 +36,8 @@ py -3.10 -m venv .venv
 ```
 
 打开本机 `http://127.0.0.1:7860`。“视频处理”上传视频、选择背景模式，默认处理全部帧；可设置输出短边、颜色、是否保留声音。“停止当前处理”会停止本会话正在处理的任务；模型加载或单帧推理需等待当前步骤返回。“摄像头预览”需允许浏览器使用摄像头，速度取决于硬件、分辨率和模型。
+
+需要连续摄像头预览时，按[实时预览说明](docs/REALTIME.md)准备 `.venv-gpu`，运行 `Start-Realtime.cmd`；它与原来的 Gradio 页面分开，默认只监听本机。当前 GTX 1660 Ti 的实测建议是 320 宽约 30 FPS、640 宽约 15–18 FPS；这是合成素材服务基准，不是真人质量或远程网络承诺。
 
 ## 功能与配置
 
@@ -116,17 +118,19 @@ py -3.10 -m venv .venv
 在代码已提交且无已跟踪文件修改时，生成本地候选包：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/package_release.py --output-dir ../deliverables/v0.2.0rc3 --evidence data/output/benchmark --evidence coverage.xml
+.\.venv\Scripts\python.exe scripts/package_release.py --output-dir ../deliverables/v0.2.0rc4 --evidence data/output/v0.2.0rc4 --evidence weights/offline-rvm-mobilenetv3-rc2
 ```
 
 目标目录必须尚不存在。工具从Git提交打包源码，附明确指定的证据、可恢复的Git历史、SHA256清单与使用说明；不会自动收录未跟踪文件、模型权重或整个运行环境。候选包不等于远端正式Release。
 
-如需附上已准备的离线模型包，可另加`--evidence weights/offline-rvm-mobilenetv3-rc2`，其文件也会逐一纳入外置清单；同时保留模型包内原始LICENSE和清单。
+单独打包时可将`--evidence weights/offline-rvm-mobilenetv3-rc2`加入命令；模型包文件会逐一纳入外置清单，同时保留包内原始LICENSE和清单。
 
 离线测试使用模型替身与本地合成音视频，不下载权重。GitHub Actions仅在对应平台触发，Gitee托管不代表此工作流已运行。
 
 - [答辩操作与交付清单](docs/DEFENSE_GUIDE.md)
-- [本版交付说明](docs/RELEASE_v0.2.0rc3.md)、[本版验证记录](docs/VALIDATION_v0.2.0rc3.md)
+- [本版交付说明](docs/RELEASE_v0.2.0rc4.md)、[本版验证记录](docs/VALIDATION_v0.2.0rc4.md)
+- [上一版独立环境记录](docs/RELEASE_v0.2.0rc3.md)、[上一版验证记录](docs/VALIDATION_v0.2.0rc3.md)
+- [实时预览说明](docs/REALTIME.md)、[实时验证记录](docs/VALIDATION_v0.2.0rc4.md)
 - [申报目标对应清单](docs/INCUBATION_CHECKLIST.md)
 - [效果和速度评测方法](docs/EVALUATION.md)
 - [接口说明](docs/API.md)、[贡献指南](CONTRIBUTING.md)、[变更记录](CHANGELOG.md)

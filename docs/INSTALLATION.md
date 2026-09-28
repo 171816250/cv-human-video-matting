@@ -44,6 +44,7 @@ py -3.10 -m venv .venv
 |---|---|
 | `requirements.txt` | 基础 RVM、网页、视频与诊断所需依赖，保留最低要求和兼容范围 |
 | `requirements-demo.txt` | 默认交付 profile，固定直接依赖与关键网页配套版本 |
+| `requirements-realtime.txt` | 独立实时 WebSocket profile，引用演示依赖并追加 Uvicorn 与 websockets |
 | `requirements-optional.txt` | BiRefNet / MiDaS 可选依赖，须在基础 profile 之上安装 |
 | `requirements-dev.txt` | pytest、覆盖率等开发测试工具，不是运行必需项 |
 | `requirements-dlf-cu117.txt` | 历史 DLF 参考，不是当前交付 profile 或完整环境快照 |

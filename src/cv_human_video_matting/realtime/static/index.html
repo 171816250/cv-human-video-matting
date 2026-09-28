@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>实时人像预览</title>
+  <style>
+    :root { font-family: system-ui, "Microsoft YaHei", sans-serif; color: #182a3c; background: #eef3f7; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; }
+    main { max-width: 1420px; margin: auto; padding: 28px 24px 36px; }
+    header { display: flex; justify-content: space-between; gap: 24px; align-items: center; margin-bottom: 24px; }
+    h1 { margin: 0 0 8px; font-size: clamp(25px, 3vw, 34px); letter-spacing: -.04em; }
+    h2 { margin: 0; font-size: 17px; }
+    p { line-height: 1.65; }
+    header p { color: #536a7d; margin: 0; }
+    .badge { flex-shrink: 0; background: #dce7ef; color: #314b62; padding: 10px 15px; border-radius: 24px; font-size: 14px; }
+    .badge[data-state="running"] { background: #d5efe4; color: #176147; }
+    .badge[data-state="error"] { background: #fae0de; color: #8c302c; }
+    .controls { background: white; border: 1px solid #d5dfe8; border-radius: 14px; padding: 20px; }
+    .fields { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; }
+    label { display: flex; flex-direction: column; gap: 8px; font-size: 13px; font-weight: 650; min-width: 160px; }
+    select, button { min-height: 44px; border-radius: 8px; font: inherit; }
+    select { padding: 9px 34px 9px 12px; color: inherit; border: 1px solid #aebdcb; background: #fff; }
+    input[type="file"] { min-height: 44px; max-width: 260px; font-size: 13px; padding-top: 9px; }
+    button { padding: 10px 22px; cursor: pointer; font-weight: 650; }
+    button:focus-visible, select:focus-visible { outline: 3px solid #72b2e8; outline-offset: 3px; }
+    .actions { display: flex; gap: 10px; margin-left: auto; }
+    #start { background: #1262a3; color: white; border: 1px solid #1262a3; }
+    #stop { background: #fff; color: #334e66; border: 1px solid #aebdcb; }
+    button:disabled { opacity: .45; cursor: default; }
+    .hint { color: #5e7183; font-size: 13px; margin: 13px 0 0; }
+    #message { margin: 16px 0; min-height: 27px; font-size: 14px; }
+    #message[data-error="true"] { color: #a22d25; }
+    .previews { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .panel { overflow: hidden; background: #fff; border: 1px solid #d5dfe8; border-radius: 14px; }
+    .panel-heading { display: flex; align-items: center; justify-content: space-between; padding: 15px 18px; gap: 12px; }
+    .panel-heading span { font-size: 12px; color: #63788b; }
+    .stage { position: relative; aspect-ratio: 16/10; background: #13202d; display: grid; place-items: center; }
+    video, #result { display: block; max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; }
+    .placeholder { position: absolute; color: #a3b5c5; padding: 20px; text-align: center; pointer-events: none; }
+    .stage[data-active="true"] .placeholder { display: none; }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+    .metric { border: 1px solid #d5dfe8; border-radius: 12px; padding: 16px 18px; background: #fff; }
+    .metric small { display: block; color: #536a7d; margin-bottom: 9px; }
+    .metric strong { font-size: 25px; font-variant-numeric: tabular-nums; }
+    .metric span { color: #63788b; font-size: 12px; margin-left: 5px; }
+    .details { color: #5e7183; font-size: 13px; margin-top: 15px; }
+    .details p { margin: 6px 0; }
+    @media (max-width: 760px) {
+      main { padding: 20px 14px; }
+      header { align-items: flex-start; }
+      .badge { padding: 8px 10px; font-size: 12px; }
+      .previews { grid-template-columns: 1fr; }
+      .metrics { grid-template-columns: 1fr 1fr; }
+      .actions { margin-left: 0; width: 100%; }
+      .actions button { flex: 1; }
+      label { flex: 1; min-width: 130px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>实时人像预览</h1><p>看看当前画面的抠像效果，再选择适合的速度与尺寸。</p></div>
+    <span id="connection" class="badge" data-state="idle" role="status">尚未启动</span>
+  </header>
+  <section class="controls" aria-label="预览设置">
+    <div class="fields">
+      <label>画面来源<select id="source"><option value="camera" selected>摄像头</option><option value="file">本地视频</option></select></label>
+      <label id="file-label" hidden>选择本地视频<input id="file-input" type="file" accept="video/*" disabled></label>
+      <label>显示效果<select id="mode">
+        <option value="green">绿色背景</option><option value="blur">背景虚化</option>
+        <option value="alpha">人物遮罩</option><option value="foreground">黑色背景</option>
+        <option value="side_by_side">原片与结果对比</option>
+      </select></label>
+      <label>发送画面最大宽度<select id="width">
+        <option value="320">320 像素 · 更轻快</option><option value="640" selected>640 像素 · 默认</option>
+        <option value="960">960 像素</option><option value="1280">1280 像素 · 更多细节</option>
+      </select></label>
+      <label>目标帧率上限<select id="rate">
+        <option value="15">15 帧 / 秒</option><option value="24">24 帧 / 秒</option>
+        <option value="30" selected>30 帧 / 秒</option>
+      </select></label>
+      <div class="actions"><button id="start" type="button">开始预览</button><button id="stop" type="button" disabled>停止并释放资源</button></div>
+    </div>
+    <p class="hint">点击开始后才启用摄像头或播放视频，不请求麦克风。本地视频静音播放，只发送当前画面，不上传完整文件。切换设置或切到后台会停止预览。</p>
+  </section>
+  <p id="message" role="status" aria-live="polite">点击开始后，请在浏览器提示中允许使用摄像头。</p>
+  <div class="previews">
+    <section class="panel"><div class="panel-heading"><h2>原始画面</h2><span id="input-source">本机摄像头</span></div>
+      <div id="original-stage" class="stage"><video id="original" muted autoplay playsinline aria-label="预览原始画面"></video><div class="placeholder">等待开始预览</div></div>
+    </section>
+    <section class="panel"><div class="panel-heading"><h2>处理结果</h2><span id="frame-size">等待第一帧</span></div>
+      <div id="result-stage" class="stage"><canvas id="result" width="640" height="360" aria-label="实时抠像结果"></canvas><div class="placeholder">处理完成的画面会显示在这里</div></div>
+    </section>
+  </div>
+  <section class="metrics" aria-label="实际预览性能">
+    <div class="metric"><small>实际显示帧率</small><strong id="display-fps">—</strong><span>帧 / 秒</span></div>
+    <div class="metric"><small>采集到结果显示</small><strong id="round-trip">—</strong><span>毫秒</span></div>
+    <div class="metric"><small>服务处理（含编解码）</small><strong id="server-time">—</strong><span>毫秒</span></div>
+    <div class="metric"><small>本次已显示</small><strong id="frame-count">0</strong><span>帧</span></div>
+  </section>
+  <div class="details">
+    <p>每次只处理一帧，显示结果后再取下一帧。目标帧率是上限；上面的帧率按浏览器实际绘制结果计算，首帧和模型预热可能较慢。</p>
+    <p>本地视频按正常速度播放、结束后自动停止，不循环。每次采集当时的画面，处理较慢时会跳过部分原始帧；本地视频测试不能替代摄像头实测。</p>
+    <p>往返耗时从浏览器采集画面到绘制结果，包含传输、处理和显示等待；服务耗时由服务端测量，包含图像解码、缩放、抠像、合成与编码。</p>
+    <p>请从实时服务的网页地址打开。本机 localhost 可以使用摄像头；其他地址须使用 HTTPS 和对应的 WSS 安全连接。</p>
+  </div>
+</main>
+<script>
+(() => {
+  "use strict";
+  const byId = (id) => document.getElementById(id);
+  const ui = {
+    start: byId("start"), stop: byId("stop"), source: byId("source"), file: byId("file-input"), fileLabel: byId("file-label"),
+    sourceLabel: byId("input-source"), mode: byId("mode"), width: byId("width"), rate: byId("rate"),
+    video: byId("original"), canvas: byId("result"), originalStage: byId("original-stage"), resultStage: byId("result-stage"),
+    connection: byId("connection"), message: byId("message"), size: byId("frame-size"),
+    fps: byId("display-fps"), roundTrip: byId("round-trip"), serverTime: byId("server-time"), count: byId("frame-count")
+  };
+  const capture = document.createElement("canvas");
+  let generation = 0;
+  let active = null;
+
+  const current = (session) => active === session && generation === session.generation;
+  function status(label, text, state = "idle") {
+    ui.connection.textContent = label;
+    ui.connection.dataset.state = state;
+    ui.message.textContent = text;
+    ui.message.dataset.error = String(state === "error");
+  }
+  function resetDisplay() {
+    ui.fps.textContent = ui.roundTrip.textContent = ui.serverTime.textContent = "—";
+    ui.count.textContent = "0";
+    ui.size.textContent = "等待第一帧";
+    ui.originalStage.dataset.active = ui.resultStage.dataset.active = "false";
+    ui.canvas.getContext("2d").clearRect(0, 0, ui.canvas.width, ui.canvas.height);
+  }
+  function stopSession(text = "已停止，摄像头、视频与连接已释放。", error = false) {
+    const session = active;
+    active = null;
+    generation += 1;
+    if (session) {
+      cancelAnimationFrame(session.raf);
+      cancelAnimationFrame(session.drawRaf);
+      clearTimeout(session.timeout);
+      clearTimeout(session.frameTimeout);
+      if (session.pendingImage) session.pendingImage.dispose();
+      for (const abort of session.decoders) abort();
+      session.decoders.clear();
+      if (session.stream) session.stream.getTracks().forEach((track) => track.stop());
+      if (session.sourceUrl) URL.revokeObjectURL(session.sourceUrl);
+      ui.video.removeEventListener("ended", session.onEnded);
+      ui.video.removeEventListener("error", session.onVideoError);
+      if (session.socket) {
+        session.socket.onopen = session.socket.onmessage = session.socket.onerror = session.socket.onclose = null;
+        if (session.socket.readyState < WebSocket.CLOSING) session.socket.close(1000, "preview stopped");
+      }
+    }
+    ui.video.pause();
+    ui.video.srcObject = null;
+    ui.video.removeAttribute("src");
+    ui.video.load();
+    ui.start.disabled = false;
+    ui.stop.disabled = true;
+    resetDisplay();
+    status(error ? "预览未完成" : "已停止", text, error ? "error" : "idle");
+  }
+  function fail(session, message) {
+    if (current(session)) stopSession(message, true);
+  }
+  function cameraError(error) {
+    const messages = {
+      NotAllowedError: "未获得摄像头权限。请在浏览器中允许此页面使用摄像头，再点击开始。",
+      SecurityError: "浏览器阻止了摄像头访问。请使用 localhost 或有效的 HTTPS 地址。",
+      NotFoundError: "没有找到可用摄像头。请连接摄像头后重试。",
+      NotReadableError: "摄像头无法打开，可能被其他程序占用。关闭占用程序后重试。",
+      OverconstrainedError: "摄像头无法使用当前采集设置，请换用可用设备后重试。"
+    };
+    return messages[error.name] || "摄像头或预览无法启动，请检查设备和本地服务后重试。";
+  }
+  function socketAddress() {
+    const local = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(location.hostname);
+    if (!["http:", "https:"].includes(location.protocol)) throw new Error("请从实时服务的网页地址打开此页面，不要直接打开本地文件。");
+    if (!window.isSecureContext || (location.protocol !== "https:" && !local)) {
+      throw new Error("摄像头需要安全页面：请使用本机 localhost，或为远程地址配置 HTTPS 与 WSS。");
+    }
+    const url = new URL("/ws", location.href);
+    url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    return url.href;
+  }
+  function decodeImage(blob, session) {
+    if (typeof createImageBitmap === "function") {
+      return createImageBitmap(blob).then((image) => ({ image, dispose: () => image.close() }));
+    }
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      const url = URL.createObjectURL(blob);
+      const clean = () => { image.onload = image.onerror = null; URL.revokeObjectURL(url); session.decoders.delete(abort); };
+      const abort = () => { clean(); image.src = ""; reject(new Error("preview stopped")); };
+      session.decoders.add(abort);
+      image.onload = () => { clean(); resolve({ image, dispose: () => { image.src = ""; } }); };
+      image.onerror = () => { clean(); reject(new Error("image decode failed")); };
+      image.src = url;
+    });
+  }
+  function nextFrame(session) {
+    session.raf = requestAnimationFrame((now) => {
+      if (!current(session) || session.inFlight || session.phase !== "running") return;
+      if (now < session.nextCaptureAt) { nextFrame(session); return; }
+      if (!ui.video.videoWidth || !ui.video.videoHeight || ui.video.readyState < 2) {
+        fail(session, "当前来源暂时没有画面，请重新开始预览。"); return;
+      }
+      const width = Math.min(session.width, ui.video.videoWidth);
+      const height = Math.max(1, Math.round(ui.video.videoHeight * width / ui.video.videoWidth));
+      capture.width = width;
+      capture.height = height;
+      session.capturedAt = performance.now();
+      session.nextCaptureAt = session.capturedAt + 1000 / session.rate;
+      session.inFlight = true;
+      session.metadata = null;
+      session.frameTimeout = setTimeout(() => fail(session, "本帧等待过久，已停止并释放资源。请检查服务状态或降低画面宽度后重试。"), 60000);
+      try {
+        capture.getContext("2d").drawImage(ui.video, 0, 0, width, height);
+        capture.toBlob((blob) => {
+          if (!current(session)) return;
+          if (!blob || blob.size > 2 * 1024 * 1024) {
+            fail(session, "画面编码失败或尺寸过大，请降低发送画面宽度后重试。"); return;
+          }
+          if (session.socket.readyState !== WebSocket.OPEN || session.socket.bufferedAmount !== 0) {
+            fail(session, "连接尚未完成本帧发送，已停止以避免画面积压。请重新开始。"); return;
+          }
+          try { session.socket.send(blob); }
+          catch (_) { fail(session, "画面发送失败，请检查实时服务后重新开始。"); }
+        }, "image/jpeg", 0.85);
+      } catch (_) { fail(session, "无法采集当前画面，请重新开始。"); }
+    });
+  }
+  async function displayFrame(session, data) {
+    if (!session.inFlight || !session.metadata || session.decoding) {
+      fail(session, "服务返回的画面顺序异常，请重新开始预览。"); return;
+    }
+    session.decoding = true;
+    let decoded;
+    try {
+      decoded = await decodeImage(new Blob([data], { type: "image/jpeg" }), session);
+      if (!current(session)) { decoded.dispose(); return; }
+      session.pendingImage = decoded;
+      session.drawRaf = requestAnimationFrame((now) => {
+        if (!current(session)) { decoded.dispose(); return; }
+        const metadata = session.metadata;
+        try {
+          ui.canvas.width = metadata.width;
+          ui.canvas.height = metadata.height;
+          ui.canvas.getContext("2d").drawImage(decoded.image, 0, 0);
+        } catch (_) {
+          fail(session, "处理画面无法显示，请重新开始预览。"); return;
+        } finally {
+          decoded.dispose();
+          session.pendingImage = null;
+        }
+        clearTimeout(session.frameTimeout);
+        session.displayTimes.push(now);
+        while (session.displayTimes.length > 2 && session.displayTimes[1] < now - 1000) session.displayTimes.shift();
+        const times = session.displayTimes;
+        ui.fps.textContent = times.length > 1 && now > times[0] ? ((times.length - 1) * 1000 / (now - times[0])).toFixed(1) : "—";
+        ui.roundTrip.textContent = Math.max(0, performance.now() - session.capturedAt).toFixed(0);
+        ui.serverTime.textContent = metadata.processing_ms.toFixed(1);
+        ui.count.textContent = String(++session.displayed);
+        ui.size.textContent = `${metadata.width} × ${metadata.height}`;
+        ui.resultStage.dataset.active = "true";
+        session.lastSeq = metadata.seq;
+        session.metadata = null;
+        session.decoding = session.inFlight = false;
+        const sourceName = session.source === "file" ? "本地视频" : "摄像头";
+        status("正在预览", sourceName + " · " + (metadata.warmup ? "正在完成模型预热，首批画面的耗时可能较长。" : "连接正常。切换设置会停止当前预览，再点击开始即可应用。"), "running");
+        // Release the in-flight frame only after drawing; capture on a later animation frame.
+        nextFrame(session);
+      });
+    } catch (_) { fail(session, "无法解码服务返回的画面，请重新开始预览。"); }
+  }
+  function receive(session, event) {
+    if (!current(session)) return;
+    if (typeof event.data !== "string") { displayFrame(session, event.data); return; }
+    let message;
+    try { message = JSON.parse(event.data); }
+    catch (_) { fail(session, "服务响应格式异常，请重新开始。"); return; }
+    if (!message || typeof message !== "object") { fail(session, "服务响应格式异常，请重新开始。"); return; }
+    if (message.type === "error") {
+      fail(session, typeof message.message === "string" ? message.message : "实时服务处理失败，请检查服务日志。");
+    } else if (message.type === "hello") {
+      if (message.protocol !== 1) { fail(session, "页面与服务版本不匹配，请刷新页面后重试。"); return; }
+      status("正在准备", "已连接服务，正在准备抠像模型…");
+    } else if (message.type === "ready" && session.phase === "connecting") {
+      session.phase = "configuring";
+      session.socket.send(JSON.stringify({ type: "configure", mode: session.mode, max_width: session.width }));
+      status("正在准备", "模型已就绪，正在应用画面设置…");
+    } else if (message.type === "configured" && session.phase === "configuring") {
+      clearTimeout(session.timeout);
+      session.phase = "running";
+      status("正在预览", "正在处理第一帧…", "running");
+      nextFrame(session);
+    } else if (message.type === "frame") {
+      if (!session.inFlight || session.metadata || !Number.isInteger(message.seq) || message.seq <= session.lastSeq ||
+          !Number.isInteger(message.width) || !Number.isInteger(message.height) || message.width < 1 || message.height < 1 ||
+          message.width > 8192 || message.height > 4096 || !Number.isFinite(message.processing_ms) || message.processing_ms < 0) {
+        fail(session, "服务返回的帧信息不完整或顺序异常，请重新开始。"); return;
+      }
+      session.metadata = message;
+    }
+  }
+  async function startSession() {
+    if (active) return;
+    if (document.hidden) { status("尚未启动", "请回到可见页面后再开始预览。"); return; }
+    let address;
+    try { address = socketAddress(); }
+    catch (error) { stopSession(error.message, true); return; }
+    if (ui.source.value === "camera" && (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)) {
+      stopSession("当前浏览器无法访问摄像头，请使用支持摄像头的浏览器和安全页面。", true); return;
+    }
+    if (ui.source.value === "file" && !ui.file.files[0]) {
+      stopSession("请先选择一个本地视频，再点击开始。", true); return;
+    }
+    resetDisplay();
+    const session = { generation: ++generation, stream: null, socket: null, raf: 0, drawRaf: 0,
+      timeout: 0, frameTimeout: 0, decoders: new Set(), pendingImage: null,
+      phase: "connecting", source: ui.source.value, sourceUrl: null, mode: ui.mode.value, width: Number(ui.width.value), rate: Number(ui.rate.value),
+      inFlight: false, decoding: false, metadata: null, lastSeq: 0, displayed: 0, displayTimes: [], nextCaptureAt: 0 };
+    active = session;
+    ui.start.disabled = true;
+    ui.stop.disabled = false;
+    status(session.source === "camera" ? "等待授权" : "准备视频", session.source === "camera" ? "请允许浏览器使用摄像头；也可以点击停止取消本次启动。" : "正在打开本地视频，不会上传完整文件。");
+    try {
+      if (session.source === "camera") {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: false,
+          video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } } });
+        if (!current(session)) { stream.getTracks().forEach((track) => track.stop()); return; }
+        session.stream = stream;
+        stream.getVideoTracks().forEach((track) => track.addEventListener("ended", () => fail(session, "摄像头已断开，请检查设备后重新开始。")));
+        ui.video.srcObject = stream;
+      } else {
+        session.sourceUrl = URL.createObjectURL(ui.file.files[0]);
+        ui.video.src = session.sourceUrl;
+        ui.video.loop = false;
+        session.onEnded = () => { if (current(session)) stopSession("本地视频已播放结束，连接已释放。可点击开始重新播放。"); };
+        session.onVideoError = () => fail(session, "本地视频无法播放，请选择浏览器支持的视频格式后重试。");
+        ui.video.addEventListener("ended", session.onEnded);
+        ui.video.addEventListener("error", session.onVideoError);
+      }
+      ui.sourceLabel.textContent = session.source === "file" ? "本地视频 · 逐帧发送" : "本机摄像头";
+      await ui.video.play();
+      if (!current(session)) return;
+      ui.originalStage.dataset.active = "true";
+      status("正在连接", "正在连接实时处理服务…");
+      const socket = new WebSocket(address);
+      session.socket = socket;
+      socket.binaryType = "arraybuffer";
+      session.timeout = setTimeout(() => fail(session, "服务准备超时，已停止并释放资源。请检查服务状态后重试。"), 120000);
+      socket.onmessage = (event) => receive(session, event);
+      socket.onerror = () => fail(session, "连接失败，已停止并释放资源。请确认实时服务正在运行，HTTPS 页面须连接 WSS 服务。");
+      socket.onclose = (event) => fail(session, event.code === 1013 ? "实时服务正被另一会话使用，请稍后重试。" : "与实时服务的连接已断开，采集与播放已停止。请重新开始。");
+    } catch (error) { fail(session, session.source === "file" ? "本地视频无法打开或播放，请选择浏览器支持的视频后重试。" : cameraError(error)); }
+  }
+  ui.start.addEventListener("click", startSession);
+  ui.stop.addEventListener("click", () => stopSession());
+  [ui.source, ui.file, ui.mode, ui.width, ui.rate].forEach((control) => control.addEventListener("change", () => {
+    stopSession("设置已更新，点击开始预览即可应用。");
+    ui.fileLabel.hidden = ui.source.value !== "file";
+    ui.file.disabled = ui.source.value !== "file";
+    ui.sourceLabel.textContent = ui.source.value === "file" ? "本地视频 · 逐帧发送" : "本机摄像头";
+  }));
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && active) stopSession("页面已转到后台，采集、播放与连接已释放。返回后请点击开始预览。");
+  });
+  window.addEventListener("pagehide", () => stopSession("页面已关闭，采集、播放与连接已释放。"));
+})();
+</script>
+</body>
+</html>

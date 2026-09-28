@@ -4,7 +4,7 @@
 
 ## 上场前准备
 
-0.2.0rc3 已提供项目 `.venv` 与 `Start-Demo.cmd` 入口。新机器先按[安装说明](INSTALLATION.md)准备环境和离线包；已有环境双击入口，检查通过后访问本地地址。离线界面不提供额外模型或深度下载；摄像头仍需浏览器授权和现场实测。本机 CPU 验收范围见[本版记录](VALIDATION_v0.2.0rc3.md)。
+0.2.0rc4 在 rc3 基础上增加独立 GPU 实时入口。批处理演示仍使用项目 `.venv` 与 `Start-Demo.cmd`；连续预览按[实时说明](REALTIME.md)准备 `.venv-gpu` 并使用 `Start-Realtime.cmd`。新机器先按安装说明准备环境和离线包；两种入口都不下载模型。实时页面默认只监听本机，摄像头仍需浏览器授权和现场实测。本机 GPU 基准见[实时验证记录](VALIDATION_v0.2.0rc4.md)。
 
 下文以 Windows PowerShell 为例，在仓库根目录运行，始终使用项目 `.venv`，无须激活。macOS/Linux 将 `.\.venv\Scripts\python.exe` 替换为 `.venv/bin/python`。模型包路径以 `weights/offline-rvm-mobilenetv3-rc2` 为例，交付位置不同须替换；启动器使用的临时配置不会自动影响之后单独执行的 CLI 命令。
 
@@ -43,6 +43,9 @@
 
 # 自动化回归；提前按安装说明安装开发依赖，不下载模型
 .\.venv\Scripts\python.exe -B -m pytest -q --cov=cv_human_video_matting --cov-report=term --cov-report=xml --cov-fail-under=70
+
+# GPU 实时服务基准；需要独立 .venv-gpu，输出目录必须不存在
+.\.venv-gpu\Scripts\python.exe -B scripts/verify_realtime.py --bundle weights/offline-rvm-mobilenetv3-rc2 --output-dir data/output/realtime-gpu-640 --device cuda --frames 120 --warmup 10 --width 640
 ```
 
 工程验收目录必须是新目录，重复运行须换名。`smoke_demo.mp4` 仅验证流程；`demo.mp4` 不随源码提供，真人质量验收仍需原片来源与使用授权、同帧对比和失败记录。
