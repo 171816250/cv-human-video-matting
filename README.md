@@ -1,375 +1,95 @@
-# cv-human-video-matting
+# 自然场景人像视频抠像与背景消除
 
-基于深度学习的自然场景人像视频抠像与背景消除系统。
+提供本地网页与命令行入口，支持视频抠像、背景替换、透明PNG序列和摄像头预览。默认使用RVM MobileNetV3；RVM ResNet50、BiRefNet为可选模型，MiDaS用于相对远近标注。
 
-## 开源孵化工程验收
+当前处于答辩候选版本准备阶段。工程测试、真实模型运行和真人素材效果评估分别记录，不以短片冒烟测试推导持续实时性能。
 
-当前工程对照申报目标的交付状态见 [孵化清单](docs/INCUBATION_CHECKLIST.md)。
-参与开发见 [贡献指南](CONTRIBUTING.md)，接口说明见 [API文档](docs/API.md)，
-真实视频效果和速度验证见 [评测方法](docs/EVALUATION.md)。
+## 快速开始
+
+以下命令在仓库根目录运行，建议Python 3.10。已有可用环境先运行检查，无须重新安装：
+
+```bash
+python -B app.py doctor --report data/output/environment.json
+```
+
+新环境先安装匹配设备的PyTorch与torchvision，再安装演示依赖。CPU示例：
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+python -m pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -r requirements-demo.txt
+python -B app.py doctor
+```
+
+`requirements-demo.txt`固定关键网页和模型依赖版本，限制NumPy版本；新机器仍需环境检查和试运行。已有环境的实际版本以诊断JSON为准。
+
+首次模型准备需联网，请在答辩前完成：
+
+```bash
+python scripts/download_models.py --models rvm_mobilenetv3
+python -B app.py ui --host 127.0.0.1 --port 7860 --no-share
+```
+
+打开本机 `http://127.0.0.1:7860`。Batch Render上传视频、选择背景模式，输出MP4或透明PNG压缩包。Live Camera需允许浏览器使用摄像头；速度取决于硬件、分辨率和模型。
+
+## 功能与配置
+
+| 能力 | 说明 |
+| --- | --- |
+| 七种渲染模式 | green纯色、image图片、blur虚化、alpha遮罩、foreground黑底前景、side_by_side对比、transparent透明PNG |
+| 视频交付 | H.264/yuv420p MP4，保留原视频首条音轨并转AAC；无音轨视频正常处理 |
+| 截取与声音 | --max-frames限制帧数，音频随输出时长截断；--no-preserve-audio去掉声音 |
+| 失败保护 | CLI先处理临时文件，成功导出后替换最终MP4；禁止覆盖输入 |
+| 后处理 | 边缘羽化、形态学开闭、时间平滑；过强平滑可能拖影 |
+| 相对距离 | MiDaS，可配置模型、阈值和刷新间隔；Near/Mid/Far不是米数 |
+| 环境检查 | doctor检查依赖、设备、FFmpeg编码器和缓存，不下载模型 |
+| 运行记录 | CLI使用--report，网页批处理自动保存同名JSON，记录配置及处理/导出耗时 |
+
+默认配置为 `configs/default.yaml`。额外配置使用 `python app.py --config 文件路径 matte ...`。布尔值写YAML的true/false，颜色写带引号的HEX字符串。显式指定不存在的RVM检查点会报错，未指定时使用预训练缓存。
+
+## 可复现操作
+
+合成素材和dummy仅用于验证处理流程：
+
+```bash
+python scripts/create_smoke_video.py
+python -B app.py matte --model dummy --device cpu --input data/input/smoke_demo.mp4 --output data/output/dummy.mp4 --mode side_by_side --max-frames 24 --report data/output/dummy.json
+```
+
+用已准备的RVM处理经授权的真人素材：
+
+```bash
+python -B app.py matte --model rvm_mobilenetv3 --device auto --input data/input/demo.mp4 --output data/output/demo-result.mp4 --mode image --background data/backgrounds/smoke_bg.jpg --report data/output/demo-result.json
+```
+
+调整输出尺寸和纯色背景：
+
+```bash
+python -B app.py matte --input data/input/demo.mp4 --output data/output/small.mp4 --resize-short 360 --background-color "#336699" --no-preserve-audio
+```
+
+`--resize-short`限制短边，仅缩小并取偶数尺寸；`matting.downsample_ratio: auto`只限制RVM内部推理长边到512以内，不单独改变输出尺寸。两者对边缘质量和速度的影响需实测。
+
+## 测试与交付资料
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -B -m pytest -q
-python app.py matte --input data/input/demo.mp4 --output data/output/result.mp4 --model rvm_mobilenetv3 --device auto --report data/output/result.json
+python -B -m pytest -q --cov=cv_human_video_matting --cov-report=term --cov-report=xml --cov-fail-under=70
 ```
 
-`--report` 保存输入分辨率、实际设备、依赖版本、处理参数和耗时。处理计时包含首帧，
-另记录模型加载加处理的总耗时；这与下方历史冒烟测试的计时口径不同。
-默认测试使用模型替身且禁止模型下载，真实抠像质量需单独验证。
-实时摄像头可打开 Relative Distance 显示相对远近，并按浏览器会话隔离时序状态。
-距离标注当前使用 MiDaS；Depth Anything 为可选后续评估。
-RVM现在读取 `matting.downsample_ratio`，默认 `auto` 将内部推理长边限制到512像素以内，
-仍输出原始尺寸。可用 `--downsample-ratio 1` 保留全尺度推理；降采样的速度与边缘质量需对比验证。
-透明输出为PNG序列，已有帧目录拒绝覆盖。普通视频导出目前不保留音轨。
-本仓库现有许可证为 MulanPSL-2.0；托管发布和社区目标的完成情况以实际平台记录为准。
+离线测试使用模型替身与本地合成音视频，不下载权重。GitHub Actions仅在对应平台触发，Gitee托管不代表此工作流已运行。
 
-本项目提供实时保留人物、消除任意复杂动态背景，输出高精度软 alpha（保留发丝/半透明衣物边缘），时序稳定不闪烁，并支持人物距离估计标注。
+- [答辩操作与交付清单](docs/DEFENSE_GUIDE.md)
+- [申报目标对应清单](docs/INCUBATION_CHECKLIST.md)
+- [效果和速度评测方法](docs/EVALUATION.md)
+- [接口说明](docs/API.md)、[贡献指南](CONTRIBUTING.md)、[变更记录](CHANGELOG.md)
 
-## ✨ 核心特性
+## 使用边界
 
-- ✅ **三档模型切换**：轻量级(RVM-MobileNetV3) / 高质量(RVM-ResNet50) / 高精度(BiRefNet SOTA)
-- ✅ **距离标注**：单目深度估计 + Near/Mid/Far 相对距离标注（核心创新点）
-- ✅ **7种背景模式**：Alpha可视化 / 绿幕 / 纯色 / 背景虚化 / 自定义图片 / 透明PNG / 左右对比
-- ✅ **实时处理**：GPU加速，22+ FPS @ GTX 1660 Ti
-- ✅ **时序稳定**：RVM循环记忆结构，避免视频闪烁
-- ✅ **后处理增强**：边缘羽化 / 形态学处理 / 时序平滑
-- ✅ **双UI支持**：Gradio Web界面 + CLI批处理
+透明输出是带alpha的PNG序列，没有音轨，不是透明MP4。深度标注当前对整个人物遮罩生成一个相对标签，尚未实现多人独立测距。BiRefNet为可选实验后端，不能直接声称达到某项质量或速度指标。真人发丝、弱光、快速运动、长视频和摄像头跨浏览器效果仍需留存评测证据。
 
-## 📊 模型对比
+大文件放在 `weights/`、`data/input/`、`data/backgrounds/`，结果在 `data/output/`，均不进入Git。离线交付需另外准备模型缓存，源码包不等于完整离线环境。
 
-| 模型 | 档位 | 速度 | 质量 | 适用场景 |
-|------|------|------|------|----------|
-| RVM-MobileNetV3 | light | 最快 | 良好 | 实时预览、CPU环境、轻量化部署 |
-| RVM-ResNet50 | hq | 快 | 优秀 | GPU实时、发丝细节好（默认档） |
-| BiRefNet | ultra | 慢 | SOTA | 高质量离线渲染、边缘精度最佳 |
-
-## 🚀 快速开始
-
-### 1. 安装依赖
-
-```bash
-# 安装 PyTorch（根据你的CUDA版本选择）
-# CUDA 12.1 示例：
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# 仅CPU（较慢）：
-pip install torch torchvision
-
-# 安装其他依赖
-pip install -r requirements.txt
-```
-
-### 2. 运行示例
-
-```bash
-# CLI批处理（带距离标注）
-python app.py matte \
-  --input data/input/demo.mp4 \
-  --output data/output/result.mp4 \
-  --model rvm_resnet50 \
-  --mode blur \
-  --enable-depth \
-  --device cuda
-
-# 启动Gradio Web UI
-python app.py ui
-
-# 查看视频信息
-python app.py inspect --input data/input/demo.mp4
-```
-
-### 3. 渲染模式说明
-
-- `alpha`: Alpha遮罩可视化（灰度图）
-- `green`: 绿幕背景（传统抠图效果）
-- `foreground`: 黑色背景（突出人物）
-- `blur`: **背景虚化**（类似人像模式景深效果）
-- `transparent`: **透明PNG帧序列**（BGRA四通道，输出为 `*_frames/frame_000000.png`，可用于后期合成）
-- `image`: 自定义背景图片替换
-- `side_by_side`: 左右对比（原图 vs 抠图结果）
-
-## 📦 项目结构
-
-```text
-cv-human-video-matting/
-  app.py                    # 主入口
-  configs/
-    default.yaml            # 默认配置
-  src/
-    cv_human_video_matting/
-      cli.py                # 命令行接口
-      pipeline.py           # 核心处理管道
-      matting/              # 抠图模型
-        rvm.py              # RobustVideoMatting
-        birefnet.py         # BiRefNet高精度引擎 ⭐新增
-        factory.py          # 模型工厂
-      depth/                # 深度估计模块 ⭐新增
-        estimator.py        # MiDaS深度估计器
-        visualizer.py       # 距离标注绘制
-      render/               # 背景合成
-        compositor.py       # 支持blur和transparent ⭐扩展
-      postprocess/          # 后处理
-      ui/                   # Gradio界面
-  tests/                    # 测试用例 ⭐新增
-  data/
-    input/                  # 输入视频
-    backgrounds/            # 背景图片
-    output/                 # 输出结果
-  weights/                  # 模型权重
-```
-
-## Current Status
-
-- [x] Project skeleton
-- [x] Video I/O pipeline
-- [x] RVM inference (MobileNetV3 + ResNet50)
-- [x] **BiRefNet high-precision engine** ⭐
-- [x] Background compositing (7 modes)
-- [x] **Background blur (bokeh effect)** ⭐
-- [x] **Transparent PNG export** ⭐
-- [x] Gradio UI
-- [x] Edge and temporal postprocessing
-- [x] Live camera matting in Gradio
-- [x] **Depth-based distance labeling (Near/Mid/Far)** ⭐
-- [x] **Comprehensive test coverage** ⭐
-- [ ] Optional MatAnyone2 evaluation
-
-## 🎯 距离标注功能
-
-本项目的**核心创新点**：使用MiDaS单目深度估计模型，在人物alpha区域内估计相对距离，并标注为Near/Mid/Far三档。
-
-**技术实现**：
-- 每N帧（默认5帧）运行一次深度估计，降低计算开销
-- 在人物区域取深度中位数，抗噪声干扰
-- 距离档位判断：逆深度 > 0.66 (Near) / 0.33~0.66 (Mid) / < 0.33 (Far)
-- 在输出视频上绘制绿色框和距离标签
-
-**CLI使用**：
-```bash
-python app.py matte \
-  --input video.mp4 \
-  --output result.mp4 \
-  --enable-depth \
-  --depth-interval 5 \
-  --device cuda
-```
-
-**注意**：这是相对距离估计，不是绝对物理测距。精确测距需要双目摄像头或ToF传感器。
-
-## Environment
-
-Python 3.9-3.11 推荐。
-NVIDIA GPU + CUDA 12.1+ 推荐（实时高质量档）。
-无GPU时自动降级到轻量档。
-CLI 和 Gradio 的设备选项支持 `auto`、`cpu`、`cuda`；`auto` 会优先使用 CUDA，不可用时自动回退到 CPU。
-
-```bash
-pip install -r requirements.txt
-```
-
-Pre-download the default lightweight model cache:
-
-```bash
-python scripts/download_models.py
-```
-
-Optional downloads:
-
-```bash
-python scripts/download_models.py --models all
-python scripts/download_models.py --models birefnet
-```
-
-## Configuration
-
-`configs/default.yaml` provides safe defaults for CLI and Gradio:
-
-- `matting.model`: default model when `--model` is omitted
-- `device.mode`: `auto`, `cpu`, or `cuda`
-- `render.mode`: default render mode
-- `postprocess.*`: alpha refinement and temporal smoothing defaults
-- `depth.enabled`: default distance labeling switch
-
-CLI arguments override config values:
-
-```bash
-python app.py --config configs/default.yaml matte --input data/input/smoke_demo.mp4 --output data/output/from_config.mp4
-python app.py --config configs/default.yaml ui
-```
-
-The base environment currently has CPU-only PyTorch. For GPU inference on this machine, use the existing `DLF` conda environment:
-
-```bash
-conda run -n DLF python -m pip install -r requirements-dlf-cu117.txt
-```
-
-Verified GPU stack:
-
-```text
-Python 3.9.13
-torch 1.13.0+cu117
-torchvision 0.14.0+cu117
-numpy 1.23.5
-opencv-python 4.8.1
-GPU: NVIDIA GeForce GTX 1660 Ti
-```
-
-## Run
-
-Show the available commands:
-
-```bash
-python app.py
-```
-
-Create a small synthetic smoke-test video:
-
-```bash
-python scripts/create_smoke_video.py
-```
-
-Inspect a video:
-
-```bash
-python app.py inspect --input data/input/smoke_demo.mp4
-```
-
-Copy video frames to verify the I/O pipeline:
-
-```bash
-python app.py copy --input data/input/smoke_demo.mp4 --output data/output/smoke_copy.mp4 --max-frames 24
-```
-
-Run the MVP matting pipeline with the deterministic dummy runner:
-
-```bash
-python app.py matte --model dummy --input data/input/smoke_demo.mp4 --output data/output/dummy_side_by_side.mp4 --mode side_by_side --max-frames 24
-```
-
-Run the MVP matting pipeline with an image background:
-
-```bash
-python app.py matte --model dummy --input data/input/smoke_demo.mp4 --output data/output/dummy_image_bg.mp4 --mode image --background data/backgrounds/smoke_bg.jpg --max-frames 24
-```
-
-After RVM dependencies and weights are available, run:
-
-```bash
-python app.py matte --model rvm_mobilenetv3 --input data/input/smoke_demo.mp4 --output data/output/rvm_green.mp4 --mode green --max-frames 24 --device cpu
-```
-
-Run with optional edge and temporal postprocessing:
-
-```bash
-python app.py matte --model rvm_mobilenetv3 --input data/input/smoke_demo.mp4 --output data/output/rvm_postprocess.mp4 --mode image --background data/backgrounds/smoke_bg.jpg --max-frames 24 --device cuda --edge-feather 3 --mask-close 3 --temporal-smooth --temporal-blend 0.65
-```
-
-Postprocessing options are off by default:
-
-- `--edge-feather`: softens alpha edges with a small blur radius.
-- `--mask-open`: removes small foreground specks.
-- `--mask-close`: fills small holes in the foreground mask.
-- `--temporal-smooth`: blends alpha mattes over time for less flicker.
-- `--temporal-blend`: previous-frame blend ratio used by temporal smoothing. Higher values are steadier but can introduce motion ghosting.
-
-## Verified Smoke Tests
-
-Dummy runner pipeline:
-
-```bash
-python scripts/create_smoke_video.py
-python app.py matte --model dummy --input data/input/smoke_demo.mp4 --output data/output/dummy_side_by_side.mp4 --mode side_by_side --max-frames 24
-```
-
-Observed result:
-
-```text
-Matting output: data\output\dummy_side_by_side.mp4
-Processed 24 frame(s) in 0.137s (175.39 FPS).
-```
-
-RVM CPU smoke test:
-
-```bash
-python app.py matte --model rvm_mobilenetv3 --input data/input/smoke_demo.mp4 --output data/output/rvm_green.mp4 --mode green --max-frames 12 --device cpu
-```
-
-Observed result:
-
-```text
-Matting output: data\output\rvm_green.mp4
-Processed 12 frame(s) in 1.578s (7.61 FPS).
-```
-
-Note: PyTorch currently runs on CPU in this environment. GPU acceleration is a later iteration.
-
-RVM GPU smoke test with `DLF`:
-
-```bash
-conda run -n DLF python app.py matte --model rvm_mobilenetv3 --input data/input/smoke_demo.mp4 --output data/output/rvm_green_gpu.mp4 --mode green --max-frames 24 --device cuda
-```
-
-Observed result:
-
-```text
-Matting output: data\output\rvm_green_gpu.mp4
-Processed 24 frame(s) in 0.726s (33.05 FPS).
-```
-
-Important: keep `DLF` on `numpy==1.23.5`. NumPy 2.x breaks `torch.from_numpy()` for `torch 1.13.0+cu117`.
-
-RVM GPU image-background smoke test with `DLF`:
-
-```bash
-conda run -n DLF python app.py matte --model rvm_mobilenetv3 --input data/input/smoke_demo.mp4 --output data/output/rvm_image_bg_gpu.mp4 --mode image --background data/backgrounds/smoke_bg.jpg --max-frames 24 --device cuda
-```
-
-Observed result:
-
-```text
-Matting output: data\output\rvm_image_bg_gpu.mp4
-Processed 24 frame(s) in 0.974s (24.63 FPS).
-```
-
-RVM GPU postprocess smoke test with `DLF`:
-
-```bash
-conda run -n DLF python app.py matte --model rvm_mobilenetv3 --input data/input/smoke_demo.mp4 --output data/output/rvm_postprocess_gpu.mp4 --mode image --background data/backgrounds/smoke_bg.jpg --max-frames 24 --device cuda --edge-feather 3 --mask-close 3 --temporal-smooth --temporal-blend 0.65
-```
-
-Use this output for quick visual comparison against the baseline image-background run.
-
-## Gradio UI
-
-Launch the demo UI with the GPU-ready `DLF` environment:
-
-```bash
-conda run -n DLF python app.py ui --host 127.0.0.1 --port 7860 --no-share
-```
-
-Then open:
-
-```text
-http://127.0.0.1:7860
-```
-
-The UI provides video upload, optional image background upload, model selection, output mode selection, auto/CPU/CUDA device selection, max-frame control, optional refinement controls, output preview, and run status.
-
-The UI now has two workspaces:
-
-- `Batch Render`: uploads a video and writes a playable MP4 result, or a zipped PNG sequence for transparent output.
-- `Live Camera`: opens the browser webcam and runs frame-by-frame matting for live preview.
-
-For live camera mode, use the `DLF` environment and choose `cuda` for the best frame rate. If the preview is slow, lower `Max Live Width` to `320` or `480`, turn off temporal smoothing, or use `dummy` to verify the webcam path first. Browser camera permission is required.
-
-## Large Files
-
-Model weights, large input videos, and generated outputs are intentionally ignored by Git. Put them under:
-
-- `weights/`
-- `data/input/`
-- `data/backgrounds/`
-- `data/output/`
-
-Keep download links and setup notes in `weights/README.md` instead of committing model files.
+项目许可证为MulanPSL-2.0；外部模型与权重遵守各自许可证。正式发布和社区指标以平台真实记录为准。

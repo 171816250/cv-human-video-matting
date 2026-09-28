@@ -5,12 +5,13 @@ device:
   mode: auto
 
 input:
-  source: video
-  resize_short: 720
+  # null keeps the source resolution; an integer limits the shorter side without upscaling.
+  resize_short: null
 
 matting:
   model: rvm_mobilenetv3
-  checkpoint: weights/rvm_mobilenetv3.pth
+  # null uses the model's pretrained weights; set an existing file for a custom checkpoint.
+  checkpoint: null
   downsample_ratio: auto
 
 postprocess:
@@ -24,13 +25,15 @@ depth:
   enabled: false
   model: MiDaS_small
   interval: 5
-  label_mode: relative
+  # Relative inverse-depth thresholds: higher values indicate nearer regions, not meters.
   thresholds:
     near: 0.66
     mid: 0.33
 
 render:
   mode: green
+  preserve_audio: true
+  # Used by green (solid background) and side_by_side modes; format is #RRGGBB.
   background_color: "#00FF00"
 
 paths:

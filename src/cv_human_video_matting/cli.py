@@ -3,20 +3,16 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
+from tempfile import TemporaryDirectory
 
-from cv_human_video_matting.io.video import copy_video, probe_video
-from cv_human_video_matting.matting.factory import create_matting_runner
-from cv_human_video_matting.pipeline import process_video
-from cv_human_video_matting.utils.config import (
-    config_bool,
-    config_float,
-    config_int,
-    config_value,
-    load_config,
-)
-from cv_human_video_matting.utils.device import resolve_device
+
+def create_matting_runner(**kwargs):
+    """Load inference dependencies only when an inference command needs them."""
+    from cv_human_video_matting.matting.factory import create_matting_runner as create
+    return create(**kwargs)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command")
+    doctor_parser = subparsers.add_parser("doctor", help="Check local readiness without downloads.")
+    doctor_parser.add_argument("--report", help="Save environment checks as JSON.")
 
     inspect_parser = subparsers.add_parser("inspect", help="Inspect an input video.")
     inspect_parser.add_argument("--input", required=True, help="Input video path.")
@@ -48,6 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
     matte_parser = subparsers.add_parser("matte", help="Run video matting on an input video.")
     matte_parser.add_argument("--input", required=True, help="Input video path.")
     matte_parser.add_argument("--report", help="Optional JSON performance report path.")
+    matte_parser.add_argument("--resize-short", type=int, help="Limit the shorter side; no upscaling.")
+    matte_parser.add_argument("--background-color", help="Solid background color, e.g. '#336699'.")
+    matte_parser.add_argument("--preserve-audio", action=argparse.BooleanOptionalAction,
+                              default=None, help="Keep original audio in MP4 output (default: on).")
     matte_parser.add_argument("--downsample-ratio", default=None,
                               help="RVM inference scale: auto or a number in (0, 1].")
     matte_parser.add_argument(
@@ -59,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         default=None,
         choices=["dummy", "rvm", "rvm_mobilenetv3", "rvm_resnet50", "birefnet"],
-        help="Matting model to use (birefnet=high precision SOTA).",
+        help="Matting model to use; BiRefNet is an optional experimental backend.",
     )
     matte_parser.add_argument(
         "--checkpoint",
@@ -147,6 +149,25 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command is None:
+        parser.print_help()
+        return
+    if args.command == "doctor":
+        from cv_human_video_matting.diagnostics import check_environment, save_diagnostics
+        report = check_environment(args.config)
+        for check in report["checks"]:
+            print(f"[{check['status'].upper()}] {check['name']}: {check['detail']}")
+        if args.report:
+            print(f"Environment report: {save_diagnostics(report, args.report)}")
+        if not report["ready"]:
+            raise SystemExit(1)
+        return
+    from cv_human_video_matting.io.video import copy_video, probe_video, export_video_for_delivery
+    from cv_human_video_matting.pipeline import process_video
+    from cv_human_video_matting.utils.config import (
+        config_bool, config_float, config_int, config_value, load_config, parse_background_color,
+    )
+    from cv_human_video_matting.utils.device import resolve_device
     config = load_config(args.config)
 
     if args.command == "inspect":
@@ -160,6 +181,8 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "matte":
+        if args.report and Path(args.report).suffix.lower() != ".json":
+            parser.error("Report path must use the .json extension.")
         if args.report and Path(args.report).resolve() in {
             Path(args.input).resolve(), Path(args.output).resolve()
         }:
@@ -171,6 +194,19 @@ def main(argv: list[str] | None = None) -> None:
         requested_device = args.device or config_value(config, "device.mode", "auto")
         device = resolve_device(requested_device)
         mode = args.mode or config_value(config, "render.mode", "green")
+        if mode != "transparent" and Path(args.output).suffix.lower() != ".mp4":
+            parser.error("Delivery video output must use the .mp4 extension.")
+        if Path(args.input).resolve() == Path(args.output).resolve():
+            parser.error("Input and output paths must differ.")
+        resize_short = args.resize_short if args.resize_short is not None else config_value(config, "input.resize_short")
+        if resize_short is not None and resize_short < 2:
+            parser.error("--resize-short must be at least 2.")
+        background_color = args.background_color or config_value(config, "render.background_color", "#00FF00")
+        color_bgr = parse_background_color(background_color)
+        preserve_audio = args.preserve_audio if args.preserve_audio is not None else config_bool(config, "render.preserve_audio", True)
+        depth_model = config_value(config, "depth.model", "MiDaS_small")
+        depth_near = config_float(config, "depth.thresholds.near", 0.66)
+        depth_mid = config_float(config, "depth.thresholds.mid", 0.33)
         edge_feather = (
             args.edge_feather
             if args.edge_feather is not None
@@ -214,22 +250,38 @@ def main(argv: list[str] | None = None) -> None:
             device=device,
             downsample_ratio=downsample_ratio,
         )
-        stats = process_video(
-            input_path=args.input,
-            output_path=args.output,
-            runner=runner,
-            mode=mode,
-            max_frames=args.max_frames,
-            background_path=args.background,
-            edge_feather=edge_feather,
-            mask_open=mask_open,
-            mask_close=mask_close,
-            temporal_smooth=temporal_smooth,
-            temporal_blend=temporal_blend,
-            enable_depth=enable_depth,
-            depth_interval=depth_interval,
-            device=device,
-        )
+        # Keep any existing delivery file intact until processing and encoding succeed.
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(prefix=".matting-", dir=destination.parent) as staging:
+            pipeline_output = destination if mode == "transparent" else Path(staging) / "frames.mp4"
+            stats = process_video(
+                input_path=args.input,
+                output_path=pipeline_output,
+                runner=runner,
+                mode=mode,
+                max_frames=args.max_frames,
+                background_path=args.background,
+                edge_feather=edge_feather,
+                mask_open=mask_open,
+                mask_close=mask_close,
+                temporal_smooth=temporal_smooth,
+                temporal_blend=temporal_blend,
+                enable_depth=enable_depth,
+                depth_interval=depth_interval,
+                device=device,
+                resize_short=resize_short,
+                depth_model=depth_model,
+                depth_near=depth_near,
+                depth_mid=depth_mid,
+                background_color_bgr=color_bgr,
+            )
+            export_started = perf_counter()
+            if mode != "transparent":
+                delivered = export_video_for_delivery(stats.output_path, destination,
+                    source_path=args.input, preserve_audio=preserve_audio)
+                stats = replace(stats, output_path=delivered)
+            export_seconds = perf_counter() - export_started
         total_seconds = perf_counter() - started_at
         if args.report:
             from cv_human_video_matting.reporting import write_run_report
@@ -241,12 +293,16 @@ def main(argv: list[str] | None = None) -> None:
                 "edge_feather": edge_feather, "mask_open": mask_open, "mask_close": mask_close,
                 "temporal_smooth": temporal_smooth, "temporal_blend": temporal_blend,
                 "enable_depth": enable_depth, "depth_interval": depth_interval,
-            }, total_seconds)
+                "depth_model": depth_model, "depth_near": depth_near, "depth_mid": depth_mid,
+                "resize_short": resize_short, "background_color": background_color,
+                "preserve_audio": preserve_audio and mode != "transparent",
+            }, total_seconds, export_seconds=export_seconds)
             print(f"Run report: {report}")
         print(f"Matting output: {stats.output_path}")
         print(f"Model: {model}")
         print(f"Mode: {mode}")
         print(f"Device: {device}")
+        print(f"Total including model loading and export: {total_seconds:.3f}s")
         print(
             f"Processed {stats.frames} frame(s) in {stats.elapsed_seconds:.3f}s "
             f"({stats.fps:.2f} FPS)."
@@ -258,13 +314,6 @@ def main(argv: list[str] | None = None) -> None:
 
         launch_demo(server_name=args.host, server_port=args.port, share=args.share, config=config)
         return
-
-    project_name = config.get("project", {}).get("name", "cv-human-video-matting")
-    parser.print_help()
-    print()
-    print(f"{project_name} is ready for Iteration 1.")
-    print("Try: python app.py inspect --input data/input/demo.mp4")
-
 
 if __name__ == "__main__":
     main()

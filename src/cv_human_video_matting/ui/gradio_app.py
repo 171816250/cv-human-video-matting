@@ -16,7 +16,7 @@ try:  # pragma: no cover - defensive; Agg is always available with matplotlib
 except Exception:
     pass
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -28,7 +28,7 @@ import gradio as gr
 import numpy as np
 
 from cv_human_video_matting.depth import DepthEstimator
-from cv_human_video_matting.io.video import ensure_browser_playable_video
+from cv_human_video_matting.io.video import ensure_browser_playable_video, export_video_for_delivery
 from cv_human_video_matting.matting.base import MattingRunner
 from cv_human_video_matting.matting.factory import create_matting_runner
 from cv_human_video_matting.pipeline import (
@@ -37,7 +37,7 @@ from cv_human_video_matting.pipeline import (
     render_matting_frame,
 )
 from cv_human_video_matting.postprocess import TemporalAlphaSmoother
-from cv_human_video_matting.utils.config import config_value
+from cv_human_video_matting.utils.config import config_value, parse_background_color, validate_project_config
 from cv_human_video_matting.utils.device import resolve_device
 from cv_human_video_matting.utils.paths import ensure_dir
 
@@ -56,7 +56,7 @@ LIVE_MODE_CHOICES = ["green", "blur", "image", "alpha", "foreground", "side_by_s
 MODEL_CHOICES = [
     ("RVM MobileNetV3 (Fast)", "rvm_mobilenetv3"),
     ("RVM ResNet50 (Balanced)", "rvm_resnet50"),
-    ("BiRefNet (High Quality)", "birefnet"),
+    ("BiRefNet (Experimental)", "birefnet"),
 ]
 MODEL_VALUES = [choice[1] for choice in MODEL_CHOICES]
 
@@ -134,7 +134,9 @@ def _live_cache_for(
     cache = cache if cache is not None else _LIVE_CACHE
     key = (model, device, bool(temporal_smooth), round(float(temporal_blend), 3))
     if cache.runner is None or cache.key != key:
-        runner = create_matting_runner(model=model, device=device,
+        checkpoint = (config_value(_ACTIVE_CONFIG, "matting.checkpoint")
+                      if model == config_value(_ACTIVE_CONFIG, "matting.model") else None)
+        runner = create_matting_runner(model=model, device=device, checkpoint=checkpoint,
             downsample_ratio=config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"))
         cache.key = key
         cache.runner = runner
@@ -162,7 +164,10 @@ def reset_live_state() -> str:
 def prepare_input_preview(video_path: str | None) -> str | None:
     if not video_path:
         return None
-    return str(ensure_browser_playable_video(video_path))
+    try:
+        return str(ensure_browser_playable_video(video_path, strict=True))
+    except (ValueError, RuntimeError) as exc:
+        raise gr.Error(f"Input preview could not be prepared: {exc}") from exc
 
 
 def _run_batch_demo(
@@ -191,6 +196,7 @@ def _run_batch_demo(
         config_value(_ACTIVE_CONFIG, "matting.checkpoint")
         if model == config_value(_ACTIVE_CONFIG, "matting.model") else None
     )
+    started_at = perf_counter()
     runner = create_matting_runner(model=model, checkpoint=checkpoint, device=actual_device,
         downsample_ratio=config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"))
     stats = process_video(
@@ -208,17 +214,47 @@ def _run_batch_demo(
         enable_depth=enable_depth,
         depth_interval=depth_interval,
         device=actual_device,
+        resize_short=config_value(_ACTIVE_CONFIG, "input.resize_short"),
+        depth_model=config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
+        depth_near=config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
+        depth_mid=config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33),
+        background_color_bgr=parse_background_color(config_value(_ACTIVE_CONFIG, "render.background_color", "#00FF00")),
     )
+    export_started = perf_counter()
     if mode == "transparent":
         archive_path = _zip_png_sequence(stats.output_path)
         output_label = f"PNG frames: {stats.output_path}\nDownload: {archive_path}"
         video_path_out = None
         artifact_path = str(archive_path)
     else:
-        playable_output = ensure_browser_playable_video(stats.output_path)
+        try:
+            playable_output = export_video_for_delivery(stats.output_path, stats.output_path,
+                source_path=video_path,
+                preserve_audio=config_value(_ACTIVE_CONFIG, "render.preserve_audio", True))
+        except (ValueError, RuntimeError) as exc:
+            raise gr.Error(f"Video export failed: {exc}") from exc
+        stats = replace(stats, output_path=playable_output)
         output_label = f"Output: {playable_output}"
         video_path_out = str(playable_output)
         artifact_path = None
+
+    export_seconds = perf_counter() - export_started
+    total_seconds = perf_counter() - started_at
+    from cv_human_video_matting.reporting import write_run_report
+    report_path = write_run_report(output_path.with_suffix(".json"), video_path, stats, {
+        "model": model, "checkpoint": checkpoint, "device": actual_device, "mode": mode,
+        "max_frames": max_frames if max_frames > 0 else None, "background": background_path,
+        "edge_feather": edge_feather, "mask_open": mask_open, "mask_close": mask_close,
+        "temporal_smooth": temporal_smooth, "temporal_blend": temporal_blend,
+        "enable_depth": enable_depth, "depth_interval": depth_interval,
+        "downsample_ratio": config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"),
+        "resize_short": config_value(_ACTIVE_CONFIG, "input.resize_short"),
+        "depth_model": config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
+        "depth_near": config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
+        "depth_mid": config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33),
+        "background_color": config_value(_ACTIVE_CONFIG, "render.background_color", "#00FF00"),
+        "preserve_audio": config_value(_ACTIVE_CONFIG, "render.preserve_audio", True) and mode != "transparent",
+    }, total_seconds, export_seconds=export_seconds)
 
     depth_label = f"Enabled (interval={depth_interval})" if enable_depth else "Disabled"
     depth_status = f"\nDepth Labeling: {depth_label}"
@@ -228,8 +264,9 @@ def _run_batch_demo(
         f"Device: {actual_device}\n"
         f"Mode: {_format_mode(mode)}\n"
         f"Frames: {stats.frames}\n"
-        f"Elapsed: {stats.elapsed_seconds:.3f}s\n"
-        f"FPS: {stats.fps:.2f}"
+        f"Pipeline elapsed: {stats.elapsed_seconds:.3f}s\nPipeline FPS: {stats.fps:.2f}\n"
+        f"Total including model loading and export: {total_seconds:.3f}s\n"
+        f"Run report: {report_path}"
         + depth_status
     )
     return BatchDemoResult(video_path=video_path_out, artifact_path=artifact_path, status=status)
@@ -343,7 +380,10 @@ def render_live_frame(
     started_at = perf_counter()
     if enable_depth and mode != "alpha":
         if cache.depth_estimator is None:
-            cache.depth_estimator = DepthEstimator(device=actual_device)
+            cache.depth_estimator = DepthEstimator(device=actual_device,
+                model_type=config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
+                near_threshold=config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
+                mid_threshold=config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33))
         if (cache.depth_map is None or cache.depth_map.shape != frame_bgr.shape[:2]
                 or cache.frames % max(1, int(depth_interval)) == 0):
             cache.depth_map = cache.depth_estimator.estimate(frame_bgr)
@@ -361,6 +401,7 @@ def render_live_frame(
         temporal_smoother=cache.temporal_smoother,
         depth_estimator=cache.depth_estimator,
         depth_map=cache.depth_map,
+        background_color_bgr=parse_background_color(config_value(_ACTIVE_CONFIG, "render.background_color", "#00FF00")),
     )
     elapsed = perf_counter() - started_at
     cache.frames += 1
@@ -723,14 +764,15 @@ def _build_css() -> str:
 
 def build_demo(config: dict | None = None) -> gr.Blocks:
     config = config or {}
+    validate_project_config(config)
     # Publish config so batch/live callbacks resolve config-only settings
     # (e.g. matting.checkpoint) the same way the CLI does.
     global _ACTIVE_CONFIG
     _ACTIVE_CONFIG = config
     batch_model_default = _choice_default(
-        config_value(config, "matting.model", "rvm_resnet50"),
+        config_value(config, "matting.model", "rvm_mobilenetv3"),
         MODEL_VALUES,
-        "rvm_resnet50",
+        "rvm_mobilenetv3",
     )
     live_model_default = _choice_default(
         config_value(config, "matting.model", "rvm_mobilenetv3"),
@@ -803,7 +845,7 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                     input_preview = gr.Video(
                                         label="Input Preview",
                                         format="mp4",
-                                        include_audio=False,
+                                        include_audio=True,
                                         height=280,
                                         interactive=False,
                                     )
@@ -819,7 +861,7 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                     output_video = gr.Video(
                                         label="Output Video",
                                         format="mp4",
-                                        include_audio=False,
+                                        include_audio=True,
                                         height=320,
                                     )
                                     output_file = gr.File(

@@ -146,7 +146,7 @@ def test_live_sessions_keep_independent_models_and_depth_intervals(monkeypatch):
     from cv_human_video_matting.ui import gradio_app as ui
     calls = []
     class FakeDepth:
-        def __init__(self, device):
+        def __init__(self, device, **kwargs):
             self.counter = 0
         def estimate(self, frame):
             self.counter += 1

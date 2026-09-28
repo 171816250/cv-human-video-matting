@@ -1,0 +1,9 @@
+# Install the matching torch/torchvision build first. Validate on the target machine.
+-r requirements.txt
+numpy<2
+gradio==4.37.2
+huggingface-hub==0.23.2
+transformers==4.41.2
+fastapi==0.111.1
+starlette==0.37.2
+pydantic==2.8.2

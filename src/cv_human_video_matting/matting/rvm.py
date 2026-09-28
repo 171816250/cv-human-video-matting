@@ -29,14 +29,17 @@ class RVMRunner:
         )
         if self.downsample_ratio != "auto" and not 0 < self.downsample_ratio <= 1:
             raise ValueError("downsample_ratio must be 'auto' or in (0, 1].")
+        checkpoint_path = Path(checkpoint) if checkpoint is not None else None
+        if checkpoint_path is not None and not checkpoint_path.is_file():
+            raise FileNotFoundError(f"RVM checkpoint does not exist or is not a file: {checkpoint_path}")
         self.model = torch.hub.load(
             RVM_HUB_REF,
             model_name,
-            pretrained=True,
+            pretrained=checkpoint_path is None,
             trust_repo=True,
         )
-        if checkpoint is not None and Path(checkpoint).exists():
-            state = torch.load(str(checkpoint), map_location=self.device)
+        if checkpoint_path is not None:
+            state = torch.load(str(checkpoint_path), map_location=self.device)
             self.model.load_state_dict(state)
         self.model = self.model.to(self.device).eval()
         self._rec = [None, None, None, None]

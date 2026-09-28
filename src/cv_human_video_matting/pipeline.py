@@ -22,6 +22,7 @@ from cv_human_video_matting.render.compositor import (
     side_by_side,
 )
 from cv_human_video_matting.utils.paths import ensure_dir, ensure_parent_dir
+from cv_human_video_matting.utils.config import validate_project_config
 
 
 @dataclass(frozen=True)
@@ -75,12 +76,15 @@ def load_background_image(path: str | Path | None) -> np.ndarray | None:
     return _load_background(path)
 
 
-def _render_frame(frame_bgr, alpha, mode: str, background_bgr=None, foreground_bgr=None):
+def _render_frame(
+    frame_bgr, alpha, mode: str, background_bgr=None, foreground_bgr=None,
+    background_color_bgr: tuple[int, int, int] = (0, 255, 0),
+):
     foreground = frame_bgr if foreground_bgr is None else foreground_bgr
     if mode == "alpha":
         return alpha_to_bgr(alpha)
     if mode == "green":
-        return compose_on_color(foreground, alpha, color_bgr=(0, 255, 0))
+        return compose_on_color(foreground, alpha, color_bgr=background_color_bgr)
     if mode == "foreground":
         return compose_on_color(foreground, alpha, color_bgr=(0, 0, 0))
     if mode == "blur":
@@ -92,7 +96,7 @@ def _render_frame(frame_bgr, alpha, mode: str, background_bgr=None, foreground_b
             raise ValueError("Render mode 'image' requires a background image.")
         return compose_on_image(foreground, alpha, background_bgr)
     if mode == "side_by_side":
-        composed = compose_on_color(foreground, alpha, color_bgr=(0, 255, 0))
+        composed = compose_on_color(foreground, alpha, color_bgr=background_color_bgr)
         return side_by_side(frame_bgr, composed)
     raise ValueError(f"Unsupported render mode: {mode}")
 
@@ -108,6 +112,7 @@ def render_matting_frame(
     temporal_smoother: TemporalAlphaSmoother | None = None,
     depth_estimator: DepthEstimator | None = None,
     depth_map: np.ndarray | None = None,
+    background_color_bgr: tuple[int, int, int] = (0, 255, 0),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Run matting on one BGR frame and return rendered frame with alpha.
 
@@ -122,10 +127,12 @@ def render_matting_frame(
         temporal_smoother: Optional temporal smoother.
         depth_estimator: Optional depth estimator for distance labeling.
         depth_map: Optional pre-computed depth map (to avoid recomputation).
+        background_color_bgr: Solid background color for green and side_by_side modes.
 
     Returns:
         Tuple of (rendered_frame, alpha_matte).
     """
+    _validate_background_color(background_color_bgr)
     result = runner.predict(frame_bgr)
     alpha = _postprocess_alpha(
         result.alpha,
@@ -134,7 +141,9 @@ def render_matting_frame(
         mask_close=mask_close,
         temporal_smoother=temporal_smoother,
     )
-    rendered = _render_frame(frame_bgr, alpha, mode, background_bgr, result.foreground)
+    rendered = _render_frame(
+        frame_bgr, alpha, mode, background_bgr, result.foreground, background_color_bgr,
+    )
 
     # Add distance labeling if depth estimator is provided
     if depth_estimator is not None and mode not in ("transparent", "alpha"):
@@ -164,6 +173,28 @@ def _postprocess_alpha(
     return refined
 
 
+def _validate_background_color(color: tuple[int, int, int]) -> None:
+    if (
+        not isinstance(color, (tuple, list)) or len(color) != 3
+        or any(isinstance(channel, bool) or not isinstance(channel, (int, np.integer))
+               or not 0 <= channel <= 255 for channel in color)
+    ):
+        raise ValueError("background_color_bgr must contain three integer channels in [0, 255].")
+
+
+def _video_frame_size(frame: np.ndarray, resize_short: int | None) -> tuple[int, int]:
+    """Compute the requested size; do not resample frames already below the limit."""
+    height, width = frame.shape[:2]
+    if resize_short is None:
+        return width, height
+    if min(width, height) < 2:
+        raise ValueError("Resizing video requires both input dimensions to be at least 2.")
+    scale = min(1.0, resize_short / min(width, height))
+    if scale == 1.0:
+        return width, height
+    return max(2, int(width * scale) // 2 * 2), max(2, int(height * scale) // 2 * 2)
+
+
 def process_video(
     input_path: str | Path,
     output_path: str | Path,
@@ -179,15 +210,28 @@ def process_video(
     enable_depth: bool = False,
     depth_interval: int = 5,
     device: str = "cpu",
+    resize_short: int | None = None,
+    depth_model: str = "MiDaS_small",
+    depth_near: float = 0.66,
+    depth_mid: float = 0.33,
+    background_color_bgr: tuple[int, int, int] = (0, 255, 0),
 ) -> PipelineStats:
     # Validate before opening a writer or modifying an existing output.
     started_at = perf_counter()
     if mode not in {"alpha", "green", "foreground", "blur", "transparent", "image", "side_by_side"}:
         raise ValueError(f"Unsupported render mode: {mode}")
-    if max_frames is not None and max_frames <= 0:
-        raise ValueError("max_frames must be positive or None.")
-    if min(edge_feather, mask_open, mask_close) < 0:
-        raise ValueError("Postprocessing radii must be non-negative.")
+    if max_frames is not None and (
+        isinstance(max_frames, bool) or not isinstance(max_frames, int) or max_frames <= 0
+    ):
+        raise ValueError("max_frames must be a positive integer or None.")
+    validate_project_config({
+        "input": {"resize_short": resize_short},
+        "postprocess": {"temporal_alpha": temporal_blend, "edge_feather": edge_feather,
+                        "mask_open": mask_open, "mask_close": mask_close},
+        "depth": {"model": depth_model, "thresholds": {"near": depth_near, "mid": depth_mid},
+                  "interval": depth_interval if enable_depth else 1},
+    })
+    _validate_background_color(background_color_bgr)
     requested_output = Path(output_path)
     if Path(input_path).resolve() == requested_output.resolve():
         raise ValueError("Input and output paths must be different.")
@@ -199,10 +243,11 @@ def process_video(
         TemporalAlphaSmoother(blend=temporal_blend) if temporal_smooth else None
     )
     depth_estimator = (
-        DepthEstimator(device=device) if enable_depth and mode not in {"alpha", "transparent"}
+        DepthEstimator(device=device, model_type=depth_model,
+                       near_threshold=depth_near, mid_threshold=depth_mid)
+        if enable_depth and mode not in {"alpha", "transparent"}
         else None
     )
-    depth_interval = max(1, depth_interval)
     reset = getattr(runner, "reset", None)
     if callable(reset):
         reset()
@@ -213,6 +258,9 @@ def process_video(
     writer = None
     processed = 0
     last_depth_map = None
+    source_shape = None
+    frame_size = None
+    rendered_shape = None
     try:
         if not capture.isOpened():
             raise ValueError(f"Failed to open input video: {info.path}")
@@ -220,6 +268,13 @@ def process_video(
             ok, frame = capture.read()
             if not ok:
                 break
+            if source_shape is None:
+                source_shape = frame.shape[:2]
+                frame_size = _video_frame_size(frame, resize_short)
+            elif frame.shape[:2] != source_shape:
+                raise ValueError("Input video frame dimensions changed during processing.")
+            if (frame.shape[1], frame.shape[0]) != frame_size:
+                frame = cv2.resize(frame, frame_size, interpolation=cv2.INTER_AREA)
             if depth_estimator is not None and processed % depth_interval == 0:
                 last_depth_map = depth_estimator.estimate(frame)
             rendered, _ = render_matting_frame(
@@ -227,8 +282,20 @@ def process_video(
                 edge_feather=edge_feather, mask_open=mask_open, mask_close=mask_close,
                 temporal_smoother=temporal_smoother, depth_estimator=depth_estimator,
                 depth_map=last_depth_map,
+                background_color_bgr=background_color_bgr,
             )
+            # OpenCV's MP4 writer silently truncates odd rows/columns. Pad only
+            # the final video frame so source pixels, alpha and depth stay aligned.
+            # PNG sequences retain their exact rendered dimensions.
+            if mode != "transparent":
+                height, width = rendered.shape[:2]
+                if height % 2 or width % 2:
+                    rendered = cv2.copyMakeBorder(
+                        rendered, 0, height % 2, 0, width % 2,
+                        cv2.BORDER_CONSTANT, value=(0, 0, 0),
+                    )
             if processed == 0:
+                rendered_shape = rendered.shape
                 if mode == "transparent":
                     _prepare_png_sequence_dir(output)
                 else:
@@ -240,6 +307,8 @@ def process_video(
                     )
                     if not writer.isOpened():
                         raise ValueError(f"Failed to open output video writer: {output}")
+            elif rendered.shape != rendered_shape:
+                raise ValueError("Rendered frame dimensions changed during processing.")
             if mode == "transparent":
                 _write_transparent_frame(output, processed, rendered)
             else:

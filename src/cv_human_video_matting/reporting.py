@@ -13,9 +13,12 @@ from cv_human_video_matting.io.video import probe_video
 from cv_human_video_matting.pipeline import PipelineStats
 
 
-def write_run_report(path, input_path, stats: PipelineStats, options: dict, total_seconds: float):
+def write_run_report(path, input_path, stats: PipelineStats, options: dict, total_seconds: float,
+                     export_seconds: float = 0.0):
     """Write measured throughput, conditions and versions; never imply quality scores."""
     target = Path(path)
+    if target.suffix.lower() != ".json":
+        raise ValueError("Report path must use the .json extension.")
     if target.resolve() in {Path(input_path).resolve(), stats.output_path.resolve()}:
         raise ValueError("Report path must differ from input and output paths.")
     dependencies = {}
@@ -27,7 +30,7 @@ def write_run_report(path, input_path, stats: PipelineStats, options: dict, tota
     info = probe_video(input_path)
     device = str(options.get("device", "cpu"))
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "input": {"path": str(info.path), "width": info.width, "height": info.height,
                   "fps": info.fps, "frame_count": info.frame_count},
@@ -37,11 +40,13 @@ def write_run_report(path, input_path, stats: PipelineStats, options: dict, tota
                         "gpu": torch.cuda.get_device_name(torch.device(device))
                         if device.startswith("cuda") and torch.cuda.is_available() else None},
         "result": {**asdict(stats), "output_path": str(stats.output_path),
+                   "export_seconds": export_seconds,
                    "total_seconds": total_seconds,
                    "total_fps": stats.frames / total_seconds if total_seconds > 0 else 0.0},
         "timing_scope": {
             "elapsed_seconds": "Video pipeline including first frame, I/O, depth initialization and writer close; excludes matting model loading.",
-            "total_seconds": "Matting model loading and video pipeline; excludes JSON report generation.",
+            "total_seconds": "Matting model loading, video pipeline and delivery export; excludes JSON report generation.",
+            "export_seconds": "Delivery video encoding/audio merge or transparent archive packaging.",
         },
         "quality_metrics": None,
     }

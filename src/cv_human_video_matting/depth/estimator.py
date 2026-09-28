@@ -10,10 +10,13 @@ For precise distance measurement, stereo cameras or ToF sensors are required.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 from cv_human_video_matting.render.compositor import normalize_alpha
+from cv_human_video_matting.utils.config import DEPTH_MODELS
 
 
 class DepthEstimator:
@@ -22,6 +25,8 @@ class DepthEstimator:
     Args:
         device: Torch device ("cpu" or "cuda").
         model_type: MiDaS model variant ("MiDaS_small" for speed, "DPT_Large" for quality).
+        near_threshold: Normalized inverse depth above which a region is labeled Near.
+        mid_threshold: Normalized inverse depth above which a region is labeled Mid.
 
     Attributes:
         device: Inference device.
@@ -29,9 +34,30 @@ class DepthEstimator:
         transform: Input preprocessing transform.
     """
 
-    def __init__(self, device: str = "cpu", model_type: str = "MiDaS_small"):
+    near_threshold = 0.66
+    mid_threshold = 0.33
+
+    def __init__(
+        self,
+        device: str = "cpu",
+        model_type: str = "MiDaS_small",
+        near_threshold: float = 0.66,
+        mid_threshold: float = 0.33,
+    ):
+        if not isinstance(model_type, str) or model_type not in DEPTH_MODELS:
+            raise ValueError(f"Unsupported depth model: {model_type}")
+        if (
+            isinstance(near_threshold, bool) or isinstance(mid_threshold, bool)
+            or not isinstance(near_threshold, (int, float))
+            or not isinstance(mid_threshold, (int, float))
+            or not math.isfinite(near_threshold) or not math.isfinite(mid_threshold)
+            or not 0 <= mid_threshold < near_threshold <= 1
+        ):
+            raise ValueError("Depth thresholds must satisfy 0 <= mid < near <= 1.")
         self.device = device
         self.model_type = model_type
+        self.near_threshold = float(near_threshold)
+        self.mid_threshold = float(mid_threshold)
 
         # Load MiDaS model from torch.hub
         self.model = torch.hub.load("intel-isl/MiDaS", model_type, trust_repo=True)
@@ -116,9 +142,9 @@ class DepthEstimator:
         distance_value = 1.0 - inverse_depth
 
         # Classify into distance tiers
-        if inverse_depth > 0.66:
+        if inverse_depth > self.near_threshold:
             label = "Near"
-        elif inverse_depth > 0.33:
+        elif inverse_depth > self.mid_threshold:
             label = "Mid"
         else:
             label = "Far"

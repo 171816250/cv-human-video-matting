@@ -1,0 +1,65 @@
+# 答辩演示与交付操作
+
+此文面向本地答辩演示。最终交付需要源码、模型及依赖准备说明、经授权的演示素材、输出样例和验证记录。版本发布、社区指标及校级/市级申报按真实材料填写。
+
+## 上场前准备
+
+1. 确认所用代码版本，记录 `git rev-parse HEAD`。保留可恢复的源码备份，演示期间固定环境与参数。
+2. 在仓库根目录运行 `python -B app.py doctor --report data/output/environment.json`。FAIL需修复，WARN需结合提示完成试运行；PASS不是画质验收。
+3. 提前下载RVM权重，运行一次实际素材，确认缓存可用。模型缓存通常不在源码目录中，换电脑必须另外准备。深度或BiRefNet首次运行可能需要额外资源，不要在现场首次启用。
+4. 至少准备三组经授权的真人短片：清晰单人、复杂背景、运动人物。每组保留原片、参数、输出、JSON、典型失败截图。不要用合成人形冒烟片替代真实效果证据。
+5. 在实际答辩机器、浏览器和投影环境上测试视频播放、声音、摄像头权限、导出和下载。准备一份已生成结果作为演示备用。
+
+## 五分钟演示顺序
+
+| 时间 | 操作 | 解释重点 |
+| --- | --- | --- |
+| 0:00–0:40 | 展示原片与任务背景 | 无绿幕自然场景的人像与背景分离 |
+| 0:40–2:00 | Batch Render选择RVM MobileNetV3，展示左右对比和图片背景 | 软alpha与模型前景合成；原始画面保持可比较 |
+| 2:00–2:40 | 播放导出MP4并检查声音 | 文件可播放，保留原音轨；截取模式不带出多余音频 |
+| 2:40–3:30 | 展示alpha和透明PNG | 透明通道用于后续合成，普通MP4不存透明alpha |
+| 3:30–4:15 | 条件允许时开启相对距离与摄像头 | Near/Mid/Far是场景内相对远近，摄像头速度现场实测 |
+| 4:15–5:00 | 展示JSON与测试记录、失败案例 | 区分处理速度、含加载/导出的总耗时与效果评估 |
+
+## 可复制命令
+
+```bash
+# 准备、检查与启动
+python scripts/download_models.py --models rvm_mobilenetv3
+python -B app.py doctor --report data/output/environment.json
+python -B app.py ui --host 127.0.0.1 --port 7860 --no-share
+
+# 正式素材运行；demo.mp4由团队准备
+python -B app.py matte --model rvm_mobilenetv3 --device auto --input data/input/demo.mp4 --output data/output/demo-compare.mp4 --mode side_by_side --max-frames 300 --report data/output/demo-compare.json
+
+# 透明输出到demo-alpha_frames；再次运行换输出名
+python -B app.py matte --input data/input/demo.mp4 --output data/output/demo-alpha.mp4 --mode transparent --max-frames 60 --report data/output/demo-alpha.json
+
+# 自动化回归；不下载模型
+python -B -m pytest -q --cov=cv_human_video_matting --cov-report=term --cov-report=xml --cov-fail-under=70
+```
+
+网页批处理自动保存同名JSON，状态栏提供路径。CLI报告路径必须以.json结尾，不能与输入或输出相同。总耗时含模型加载、处理和交付导出；短片单次FPS不能代表长视频或所有设备性能。
+
+## 现场故障处理
+
+| 现象 | 处理 |
+| --- | --- |
+| 模型加载等待或网络失败 | 检查权重缓存，先用准备好的输出讲解；回到已试运行的RVM模型 |
+| 处理速度低 | 使用MobileNetV3，关闭深度，降低实时预览宽度或批处理短边；保存新参数以便比较 |
+| 显式CUDA不可用 | 运行doctor核对环境；选择CPU完成基本功能演示并记录实际设备 |
+| 视频不能导出 | 查看明确的FFmpeg错误，运行doctor；CLI失败保留原有结果文件 |
+| 画面边缘拖影 | 关闭或降低时间平滑，用相同帧比较原始与后处理结果 |
+| 摄像头无图像 | 核对浏览器权限、其他软件占用及访问地址；使用批处理素材继续演示 |
+| 透明输出已存在 | 换一个输出名，避免覆盖已有帧 |
+
+## 最终提交前仍需确认
+
+- [ ] 三组真人案例与边缘/运动/弱光失败案例已整理，并确认素材授权。
+- [ ] 真实素材每组至少三次运行，保留硬件、帧数、耗时中位数与波动。
+- [ ] MiDaS与可选BiRefNet是否纳入正式演示，分别具有实际运行证据。
+- [ ] 目标机器的全新环境安装、离线启动、摄像头、长视频和浏览器播放完成验收。
+- [ ] 源码、运行指南、模型来源及许可说明、样例、报告和版本标识齐全。
+- [ ] 根据申报书核对正式Release、提交/分支/贡献者及社区指标，附平台证据。
+
+以上未勾选项不能仅凭自动化测试填为已完成。经费与管理材料单独核对，不从代码或测试推算。
