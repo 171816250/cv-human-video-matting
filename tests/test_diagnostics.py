@@ -235,6 +235,35 @@ def test_enabled_depth_checks_optional_versions_without_transformers(environment
     assert Path(report["optional_requirements_profile"]).name == "requirements-optional.txt"
 
 
+def test_depth_anything_doctor_checks_local_files_and_relevant_dependencies(environment, tmp_path):
+    checkpoint = tmp_path / "depth-anything"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text(
+        '{"model_type":"depth_anything","depth_estimation_type":"relative",'
+        '"backbone":null,"backbone_config":{"model_type":"dinov2",'
+        '"hidden_size":384,"patch_size":14}}',
+        encoding="utf-8",
+    )
+    (checkpoint / "preprocessor_config.json").write_text("{}", encoding="utf-8")
+    (checkpoint / "model.safetensors").write_bytes(b"local-test-weights")
+    environment.config = {
+        "matting": {"model": "dummy"},
+        "depth": {"enabled": True, "model": "DepthAnythingV2_small",
+                  "checkpoint": str(checkpoint)},
+    }
+    report = diagnostics.check_environment()
+    checks = checks_by_name(report)
+    assert checks["depth-checkpoint"]["status"] == "pass"
+    assert checks["depth-model"]["status"] == "warn"
+    assert report["checked_optional_packages"] == ["safetensors", "transformers"]
+    assert "timm" not in checks
+    assert report["ready"]
+
+    (checkpoint / "model.safetensors").unlink()
+    checks = checks_by_name(diagnostics.check_environment())
+    assert checks["depth-checkpoint"]["status"] == "fail"
+
+
 def test_enabled_birefnet_checks_transformers_version_even_when_import_works(environment):
     environment.config = {"matting": {"model": "birefnet"}}
     environment.versions["transformers"] = "4.33.1"

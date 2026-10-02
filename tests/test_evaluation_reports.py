@@ -95,6 +95,37 @@ def test_png_manifest_and_asset_hashes_are_reproducible(real_run, tmp_path):
     assert evaluation.summarize_reports(target)["group_count"] == 1
 
 
+def test_depth_anything_report_records_local_weight_identity(real_run, tmp_path):
+    source, stats = real_run
+    directory = tmp_path / "depth-small"
+    directory.mkdir()
+    (directory / "config.json").write_text(
+        '{"model_type":"depth_anything","backbone_config":{"model_type":"dinov2",'
+        '"hidden_size":384,"patch_size":14}}',
+        encoding="utf-8",
+    )
+    (directory / "preprocessor_config.json").write_text("{}", encoding="utf-8")
+    weights = directory / "model.safetensors"
+    weights.write_bytes(b"test-only depth model bytes")
+    options = {"model": "dummy", "device": "cpu", "mode": "green",
+               "enable_depth": True, "depth_model": "DepthAnythingV2_small",
+               "depth_checkpoint": str(directory)}
+    target = reporting.write_run_report(tmp_path / "depth-run.json", source, stats, options, 5)
+    report = json.loads(target.read_text(encoding="utf-8"))
+    depth = report["assets"]["depth_checkpoint"]
+    assert depth["files"]["model.safetensors"]["sha256"] == sha(weights)
+    assert depth["content_sha256"] == reporting._canonical_hash(depth["files"])
+    assert "not confirmed" in depth["integrity_scope"]
+    assert evaluation.summarize_reports([target])["group_count"] == 1
+
+    depth["content_sha256"] = "0" * 64
+    target.write_text(json.dumps(report), encoding="utf-8")
+    assert evaluation.summarize_reports([target])["group_count"] == 0
+
+    with pytest.raises(ValueError):
+        reporting.write_run_report(directory / "unsafe.json", source, stats, options, 5)
+
+
 def test_staged_output_hash_uses_actual_file_but_records_published_path(real_run, tmp_path):
     source, stats = real_run
     published = tmp_path / "published-task" / "result.mp4"

@@ -1,10 +1,12 @@
 # 自然场景人像视频抠像与背景消除
 
-提供本地网页与命令行入口，支持视频抠像、背景替换、透明PNG序列和摄像头预览。默认使用RVM MobileNetV3；RVM ResNet50、BiRefNet为可选模型，MiDaS用于相对远近标注。
+提供本地网页与命令行入口，支持视频抠像、背景替换、透明PNG序列和摄像头预览。默认使用RVM MobileNetV3；RVM ResNet50、BiRefNet为可选模型。相对远近标注沿用MiDaS，并新增实验性的Depth Anything V2 Small本地后端。
 
 当前处于答辩候选版本准备阶段。工程测试、真实模型运行和真人素材效果评估分别记录，不以短片冒烟测试推导持续实时性能。
 
 当前候选版本为 **0.2.0rc4**：新增独立 GPU 实时 WebSocket 工作区、逐帧在途控制、浏览器摄像头/本地视频来源、实时 FPS 与延迟指标。基础批处理、CPU 独立环境、离线模型校验、自适应平滑、无损中间视频、失败回滚与运行报告继续保留。
+
+后续未发布改进增加可选深度模型的本地准备、私人案例证据收集和Gitee Go配置。Depth Anything真实权重已在本机CPU合成帧上跑通；真人效果、三组授权案例、目标服务器速度及Gitee平台构建仍需分别验收。
 
 ## 快速开始
 
@@ -48,10 +50,11 @@ py -3.10 -m venv .venv
 | 截取与声音 | --max-frames限制帧数，音频随输出时长截断；--no-preserve-audio去掉声音 |
 | 失败保护 | 建模前预检参数与输入；CLI先生成媒体与报告再发布，常规失败回滚旧结果；网页按完整任务目录发布 |
 | 后处理 | 边缘羽化、形态学开闭、EMA/自适应时间平滑；默认关闭，自适应减少变化边缘的历史残留 |
-| 相对距离 | MiDaS，可配置模型、阈值和刷新间隔；Near/Mid/Far不是米数 |
+| 相对距离 | MiDaS或实验性的Depth Anything V2 Small；可配置本地深度目录、阈值和刷新间隔；Near/Mid/Far不是米数 |
 | 环境检查 | doctor核对依赖版本要求、设备、编码器、FFV1实际写读和离线包/缓存，不下载模型 |
 | 离线模型 | 从已有缓存导出RVM源码、权重与LICENSE，加载前逐文件校验；运行报告记录内容身份 |
 | 运行记录 | CLI使用--report；网页可下载result.json，记录版本、源码/文件SHA256、实际输出尺寸及处理/导出耗时 |
+| 案例证据 | 从已有运行报告采集同帧原图/结果截图、参数和哈希，保存到仓库外的私有目录；不生成质量评分 |
 
 网页任务存放在 `data/output/gradio_时间_标识_模式/`，视频为 `result.mp4`，报告为 `result.json`；透明模式包含帧目录与ZIP。`paths.output_dir`可更改保存位置。网页推理任务依次运行以减少显存争用；停止按钮针对已开始的当前任务，排队任务暂不能撤回。
 
@@ -69,7 +72,7 @@ py -3.10 -m venv .venv
 .\.venv\Scripts\python.exe -B scripts/rehearse_offline.py --bundle weights/offline-rvm-mobilenetv3-rc2 --input data/input/smoke_demo.mp4 --output-dir data/output/offline-rehearsal --device cpu --max-frames 8
 ```
 
-网页可用 `.\.venv\Scripts\python.exe -B app.py ui --model-bundle weights/offline-rvm-mobilenetv3-rc2 --no-share` 指定模型包，也可在配置中设置 `matting.bundle`；CLI同样支持。离线界面固定包内模型并关闭深度标注，避免误选尚未准备的模型。离线包不包含运行环境、CUDA驱动或MiDaS。导出和试运行目录必须是新目录；详细步骤见[离线部署说明](docs/OFFLINE_MODEL.md)。
+网页可用 `.\.venv\Scripts\python.exe -B app.py ui --model-bundle weights/offline-rvm-mobilenetv3-rc2 --no-share` 指定模型包，也可在配置中设置 `matting.bundle`；CLI同样支持。离线界面固定包内抠像模型；未配置独立的Depth Anything本地目录时，深度标注仍关闭。RVM包不包含运行环境、CUDA驱动或任何深度模型。导出和试运行目录必须是新目录；详细步骤见[离线部署说明](docs/OFFLINE_MODEL.md)及[可选深度模型说明](docs/DEPTH_ANYTHING.md)。
 
 `scripts/verify_local_demo.py` 可自动启动真实本地网页，上传样例并下载、校验视频和报告，最终回收服务。用法及网络限制见[安装与验收说明](docs/INSTALLATION.md)。
 
@@ -100,6 +103,8 @@ py -3.10 -m venv .venv
 
 `--resize-short`限制短边，仅缩小并取偶数尺寸；`matting.downsample_ratio: auto`只限制RVM内部推理长边到512以内，不单独改变输出尺寸。两者对边缘质量和速度的影响需实测。
 
+可选Depth Anything V2 Small仅从已准备的本地目录加载。先按[准备与验收步骤](docs/DEPTH_ANYTHING.md)安装可选依赖、准备并校验资源，再使用 `--enable-depth --depth-model DepthAnythingV2_small --depth-checkpoint weights/depth-anything-v2-small-hf`。本机真实权重合成帧烟测见[验证记录](docs/VALIDATION_DEPTH_ANYTHING_2026-10-02.md)。这条路径适用于CLI和Gradio；独立WebSocket实时工作区尚未接入深度标注。
+
 ## 测试与交付资料
 
 同一素材和参数至少运行三次，分别保存报告后生成可离线打开的中文汇总页：
@@ -109,6 +114,8 @@ py -3.10 -m venv .venv
 ```
 
 汇总按报告记录的输入哈希、代码版本、设备、参数和处理帧数分组，展示中位数与范围；旧版或信息不足的报告单独列出。默认缓存权重仍需团队固定并另行核验，汇总不产生画质评分。
+
+三组教学案例按[真实试用与案例证据流程](docs/CASE_EVIDENCE.md)准备授权原片，再用 `scripts/collect_case_evidence.py collect` 收集同帧截图与清单、用 `verify` 复核。工具要求已有授权记录和运行报告，拒绝把案例目录写进仓库；截图、原片路径和授权材料应保持私有。它不会验证授权法律效力，也不会替团队作人工画质评价。
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
@@ -125,19 +132,20 @@ py -3.10 -m venv .venv
 
 单独打包时可将`--evidence weights/offline-rvm-mobilenetv3-rc2`加入命令；模型包文件会逐一纳入外置清单，同时保留包内原始LICENSE和清单。
 
-离线测试使用模型替身与本地合成音视频，不下载权重。GitHub Actions仅在对应平台触发，Gitee托管不代表此工作流已运行。
+离线测试使用模型替身与本地合成音视频，不下载权重。GitHub Actions仅在对应平台触发；另已准备 [Gitee Go配置](.workflow/python-ci.yml)及[开通说明](docs/GITEE_CI.md)，配置目标是完整离线测试集和70%覆盖率门槛。Gitee页面开通、配置解析和实际构建尚未验证，仓库托管、本地测试通过或存在YAML都不代表平台流水线已运行。
 
 - [答辩操作与交付清单](docs/DEFENSE_GUIDE.md)
 - [本版交付说明](docs/RELEASE_v0.2.0rc4.md)、[本版验证记录](docs/VALIDATION_v0.2.0rc4.md)
 - [上一版独立环境记录](docs/RELEASE_v0.2.0rc3.md)、[上一版验证记录](docs/VALIDATION_v0.2.0rc3.md)
 - [实时预览说明](docs/REALTIME.md)、[实时验证记录](docs/VALIDATION_v0.2.0rc4.md)
 - [申报目标对应清单](docs/INCUBATION_CHECKLIST.md)
+- [Depth Anything V2 Small本地准备](docs/DEPTH_ANYTHING.md)、[私人案例证据](docs/CASE_EVIDENCE.md)、[Gitee Go状态与开通](docs/GITEE_CI.md)
 - [效果和速度评测方法](docs/EVALUATION.md)
 - [接口说明](docs/API.md)、[贡献指南](CONTRIBUTING.md)、[变更记录](CHANGELOG.md)
 
 ## 使用边界
 
-透明输出是带alpha的PNG序列，没有音轨，不是透明MP4。深度标注当前对整个人物遮罩生成一个相对标签，尚未实现多人独立测距。BiRefNet为可选实验后端，不能直接声称达到某项质量或速度指标。真人发丝、弱光、快速运动、长视频和摄像头跨浏览器效果仍需留存评测证据。
+透明输出是带alpha的PNG序列，没有音轨，不是透明MP4。深度标注当前对整个人物遮罩生成一个相对标签，尚未实现多人独立测距。BiRefNet与Depth Anything V2 Small属于可选实验后端，不能直接声称达到某项质量或速度指标。真人发丝、弱光、快速运动、长视频和摄像头跨浏览器效果仍需留存评测证据。
 
 大文件放在 `weights/`、`data/input/`、`data/backgrounds/`，结果在 `data/output/`，均不进入Git。离线交付需另外准备模型缓存，源码包不等于完整离线环境。
 

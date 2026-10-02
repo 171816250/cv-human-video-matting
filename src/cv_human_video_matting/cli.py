@@ -183,6 +183,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Run depth estimation every N frames (default: 5).",
     )
+    matte_parser.add_argument(
+        "--depth-model",
+        default=None,
+        help="MiDaS_small (default), DPT_Large, DPT_Hybrid, or optional DepthAnythingV2_small.",
+    )
+    matte_parser.add_argument(
+        "--depth-checkpoint",
+        default=None,
+        help="Prepared local model directory required for DepthAnythingV2_small; no download is performed.",
+    )
 
     ui_parser = subparsers.add_parser("ui", help="Launch the Gradio demo UI.")
     ui_parser.add_argument("--host", default="127.0.0.1", help="Server host.")
@@ -321,7 +331,8 @@ def main(argv: list[str] | None = None) -> None:
         background_color = args.background_color or config_value(config, "render.background_color", "#00FF00")
         color_bgr = parse_background_color(background_color)
         preserve_audio = args.preserve_audio if args.preserve_audio is not None else config_bool(config, "render.preserve_audio", True)
-        depth_model = config_value(config, "depth.model", "MiDaS_small")
+        depth_model = args.depth_model or config_value(config, "depth.model", "MiDaS_small")
+        depth_checkpoint = args.depth_checkpoint or config_value(config, "depth.checkpoint")
         depth_near = config_float(config, "depth.thresholds.near", 0.66)
         depth_mid = config_float(config, "depth.thresholds.mid", 0.33)
         edge_feather = (
@@ -373,7 +384,8 @@ def main(argv: list[str] | None = None) -> None:
             temporal_smooth=temporal_smooth, temporal_blend=temporal_blend,
             temporal_mode=temporal_mode, temporal_motion_threshold=temporal_motion_threshold,
             enable_depth=enable_depth, depth_interval=depth_interval, resize_short=resize_short,
-            depth_model=depth_model, depth_near=depth_near, depth_mid=depth_mid,
+            depth_model=depth_model, depth_checkpoint=depth_checkpoint,
+            depth_near=depth_near, depth_mid=depth_mid,
             background_color_bgr=color_bgr,
         )
         from cv_human_video_matting.reporting import validate_artifact_paths
@@ -382,7 +394,7 @@ def main(argv: list[str] | None = None) -> None:
         destination = prepared.output_path
         validate_artifact_paths(
             args.report, args.input, destination,
-            asset_paths=[path for path in (checkpoint, args.background, bundle_path) if path],
+            asset_paths=[path for path in (checkpoint, args.background, bundle_path, depth_checkpoint) if path],
         )
         started_at = perf_counter()
         runner = create_matting_runner(
@@ -415,6 +427,7 @@ def main(argv: list[str] | None = None) -> None:
                 device=device,
                 resize_short=resize_short,
                 depth_model=depth_model,
+                depth_checkpoint=depth_checkpoint,
                 depth_near=depth_near,
                 depth_mid=depth_mid,
                 background_color_bgr=color_bgr,
@@ -441,7 +454,8 @@ def main(argv: list[str] | None = None) -> None:
                     "temporal_mode": temporal_mode, "temporal_motion_threshold": temporal_motion_threshold,
                     "intermediate_codec": "PNG" if mode == "transparent" else "FFV1",
                     "enable_depth": enable_depth, "depth_interval": depth_interval,
-                    "depth_model": depth_model, "depth_near": depth_near, "depth_mid": depth_mid,
+                    "depth_model": depth_model, "depth_checkpoint": str(depth_checkpoint) if depth_checkpoint else None,
+                    "depth_near": depth_near, "depth_mid": depth_mid,
                     "resize_short": resize_short, "background_color": background_color,
                     "preserve_audio": preserve_audio and mode != "transparent",
                 }, total_seconds, export_seconds=export_seconds, published_output_path=destination,

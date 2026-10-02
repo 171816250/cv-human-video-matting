@@ -52,3 +52,31 @@ def test_offline_controls_only_offer_bundled_model_and_disable_depth(offline_con
         assert all(item["interactive"] is False and item["value"] is False for item in depth)
     finally:
         demo.close()
+
+
+def test_offline_bundle_allows_separately_prepared_depth_anything(tmp_path, offline_config):
+    checkpoint = tmp_path / "depth-anything"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text(
+        '{"model_type":"depth_anything","depth_estimation_type":"relative",'
+        '"backbone":null,"backbone_config":{"model_type":"dinov2",'
+        '"hidden_size":384,"patch_size":14}}',
+        encoding="utf-8",
+    )
+    (checkpoint / "preprocessor_config.json").write_text("{}", encoding="utf-8")
+    (checkpoint / "model.safetensors").write_bytes(b"local-test-weights")
+    offline_config["depth"] = {
+        "model": "DepthAnythingV2_small", "checkpoint": str(checkpoint), "enabled": False,
+    }
+    assert ui._model_assets("rvm_mobilenetv3", enable_depth=True) == (
+        None, "verified-mobile-bundle",
+    )
+    demo = ui.build_demo(offline_config)
+    try:
+        controls = [item["props"] for item in demo.config["components"]]
+        depth = [item for item in controls if item.get("label") in {
+            "启用相对远近标注", "Relative Distance (Near / Mid / Far)"}]
+        assert len(depth) == 2
+        assert all(item["interactive"] is True for item in depth)
+    finally:
+        demo.close()

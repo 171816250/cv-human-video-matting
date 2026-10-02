@@ -85,6 +85,19 @@ def _conditions(report: dict) -> tuple[dict | None, list[str], dict | None]:
                 or not isinstance(bundle.get("weights"), dict)
                 or not _sha256(bundle["weights"].get("sha256"))):
             reasons.append("缺少已确认加载的离线模型包与权重哈希。")
+    if (options.get("enable_depth") and options.get("depth_model") == "DepthAnythingV2_small"
+            and options.get("mode") not in {"alpha", "transparent"}):
+        depth_asset = assets.get("depth_checkpoint")
+        files = depth_asset.get("files") if isinstance(depth_asset, dict) else None
+        required = ("config.json", "preprocessor_config.json", "model.safetensors")
+        if (not isinstance(files, dict) or set(files) != set(required)
+                or any(not isinstance(files[name], dict)
+                       or not _sha256(files[name].get("sha256"))
+                       or not _finite_positive(files[name].get("size_bytes"))
+                       for name in required)
+                or not _sha256(depth_asset.get("content_sha256"))
+                or depth_asset["content_sha256"] != _canonical_hash(files)):
+            reasons.append("缺少可复核的Depth Anything模型资源哈希。")
 
     measurements = None
     required = ("frames", "elapsed_seconds", "total_seconds")

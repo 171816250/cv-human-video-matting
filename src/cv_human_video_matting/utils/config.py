@@ -42,7 +42,7 @@ _FALSE_STRINGS = {"false", "0", "no", "n", "off", ""}
 
 
 RENDER_MODES = {"alpha", "green", "foreground", "blur", "transparent", "image", "side_by_side"}
-DEPTH_MODELS = {"MiDaS_small", "DPT_Large", "DPT_Hybrid"}
+DEPTH_MODELS = {"MiDaS_small", "DPT_Large", "DPT_Hybrid", "DepthAnythingV2_small"}
 
 
 def parse_background_color(value: str) -> tuple[int, int, int]:
@@ -120,6 +120,16 @@ def validate_project_config(config: dict[str, Any]) -> None:
         section, key = path.split(".")
         if key in config.get(section, {}):
             choice(path, choices)
+
+    depth_checkpoint = depth.get("checkpoint")
+    if depth_checkpoint is not None and (
+        not isinstance(depth_checkpoint, str) or not depth_checkpoint.strip()
+    ):
+        raise ValueError("depth.checkpoint must be a non-empty local directory path or null.")
+    if depth_checkpoint is not None and depth.get("model", "MiDaS_small") != "DepthAnythingV2_small":
+        raise ValueError("depth.checkpoint is only supported by DepthAnythingV2_small.")
+    if depth.get("enabled", False) and depth.get("model") == "DepthAnythingV2_small" and not depth_checkpoint:
+        raise ValueError("DepthAnythingV2_small requires depth.checkpoint to point to a local model directory.")
 
     device = config_value(config, "device.mode", "auto")
     if not isinstance(device, str) or re.fullmatch(r"auto|cpu|cuda(?::[0-9]+)?", device) is None:

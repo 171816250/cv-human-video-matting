@@ -1,0 +1,31 @@
+version: '1.0'
+name: python-cpu-tests
+displayName: Python CPU 单元测试
+
+triggers:
+  push:
+    branches:
+      include:
+        - '.*'
+  pr:
+    branches:
+      include:
+        - '.*'
+
+stages:
+  - stage: ''
+    name: unit-tests
+    displayName: CPU 单元测试
+    strategy: naturally
+    trigger: auto
+    steps:
+      - step: build@python
+        name: pytest-cpu
+        displayName: 安装依赖并运行完整 pytest 与覆盖率门槛
+        pythonVersion: 3.9
+        commands:
+          - python3 -m pip install --upgrade pip
+          - python3 -m pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+          - python3 -m pip install -r requirements-demo.txt -r requirements-dev.txt
+          - python3 -m pip check
+          - HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 GRADIO_ANALYTICS_ENABLED=False python3 -B -m pytest -q --cov=cv_human_video_matting --cov-report=term-missing --cov-fail-under=70

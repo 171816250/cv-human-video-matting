@@ -213,8 +213,12 @@ def check_environment(config_path="configs/default.yaml", requirements_path=None
                 record("model-bundle", "fail", exc)
         if model in {"birefnet", "ultra"}:
             optional_packages.update(("transformers", "timm", "safetensors"))
-        if config.get("depth", {}).get("enabled", False):
-            optional_packages.update(("timm", "safetensors"))
+        depth = config.get("depth", {})
+        if depth.get("enabled", False):
+            if depth.get("model") == "DepthAnythingV2_small":
+                optional_packages.update(("transformers", "safetensors"))
+            else:
+                optional_packages.update(("timm", "safetensors"))
         if optional_packages:
             optional_profile = Path(__file__).resolve().parents[2] / "requirements-optional.txt"
             _check_requirements(optional_profile, record, packages=optional_packages,
@@ -265,9 +269,23 @@ def check_environment(config_path="configs/default.yaml", requirements_path=None
         elif config_valid and bundle is None and model != "dummy":
             record("model-cache", "warn", "Optional backend: verify its weights and a full run before the demo.")
     if config_valid and config.get("depth", {}).get("enabled", False):
-        record("depth-model", "warn", "Depth is enabled; MiDaS code/weights are not included in the RVM bundle. "
-               "MiDaS_small also needs the gen-efficientnet-pytorch code and backbone weights. "
-               "Prepare depth separately and rehearse a full run before going offline.")
+        depth = config["depth"]
+        if depth.get("model") == "DepthAnythingV2_small":
+            try:
+                from cv_human_video_matting.depth import validate_depth_checkpoint
+
+                validate_depth_checkpoint(depth["model"], depth.get("checkpoint"))
+                record("depth-checkpoint", "pass",
+                       f"Depth Anything V2 Small local files present: {depth['checkpoint']}. "
+                       "This check does not load weights or prove inference quality.")
+            except Exception as exc:
+                record("depth-checkpoint", "fail", exc)
+            record("depth-model", "warn", "Depth Anything V2 Small is experimental. "
+                   "Rehearse a real-weight run before using relative distance labels.")
+        else:
+            record("depth-model", "warn", "Depth is enabled; MiDaS code/weights are not included in the RVM bundle. "
+                   "MiDaS_small also needs the gen-efficientnet-pytorch code and backbone weights. "
+                   "Prepare depth separately and rehearse a full run before going offline.")
 
     if "cv2" in modules and "numpy" in modules:
         try:

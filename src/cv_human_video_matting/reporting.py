@@ -61,14 +61,14 @@ def _atomic_write_text(target: Path, text: str) -> Path:
 
 
 def _protect_paths(target: Path, sources) -> None:
-    resolved_target = target.resolve()
+    resolved_target = target.absolute().resolve()
     for source in sources:
-        source = Path(source)
-        if resolved_target == source.resolve():
+        source = Path(source).expanduser().absolute().resolve()
+        if resolved_target == source:
             raise ValueError(f"Report path must differ from input and output paths: {source}")
-        if source.is_dir() and resolved_target.is_relative_to(source.resolve()):
+        if source.is_dir() and resolved_target.is_relative_to(source):
             raise ValueError(f"Report must be outside the output sequence directory: {source}")
-        if target.exists() and source.exists() and target.samefile(source):
+        if resolved_target.exists() and source.exists() and resolved_target.samefile(source):
             raise ValueError(f"Report path aliases an existing input or output: {source}")
 
 
@@ -220,7 +220,8 @@ def write_run_report(path, input_path, stats: PipelineStats, options: dict, tota
     published_output = Path(published_output_path) if published_output_path is not None else output
     if target.suffix.lower() != ".json":
         raise ValueError("Report path must use the .json extension.")
-    assets_paths = [options.get(name) for name in ("checkpoint", "background", "model_bundle")]
+    assets_paths = [options.get(name) for name in (
+        "checkpoint", "background", "model_bundle", "depth_checkpoint")]
     validate_artifact_paths(target, source, output, assets_paths)
     validate_artifact_paths(target, source, published_output, assets_paths)
     _protect_paths(target, (source, output, published_output))
@@ -254,6 +255,19 @@ def write_run_report(path, input_path, stats: PipelineStats, options: dict, tota
             "model_name": bundle["model_name"], "content_sha256": bundle["content_sha256"],
             "weights": weights, "load_identity_confirmed": model_bundle_info is not None,
             "integrity_scope": "Local byte identity; not an upstream signature or quality guarantee.",
+        }
+    if (options.get("enable_depth") and options.get("depth_model") == "DepthAnythingV2_small"
+            and options.get("mode") not in {"alpha", "transparent"}):
+        from cv_human_video_matting.depth import validate_depth_checkpoint
+
+        depth_path = options.get("depth_checkpoint")
+        validate_depth_checkpoint("DepthAnythingV2_small", depth_path)
+        directory = Path(depth_path).expanduser()
+        files = {name: _file_record(directory / name) for name in (
+            "config.json", "preprocessor_config.json", "model.safetensors")}
+        assets["depth_checkpoint"] = {
+            "path": str(directory), "files": files, "content_sha256": _canonical_hash(files),
+            "integrity_scope": "Local files at report time; loaded weight identity is not confirmed.",
         }
     report = {
         "schema_version": 3, "kind": "run_report",

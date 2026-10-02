@@ -139,6 +139,22 @@ def test_publication_paths_cannot_overwrite_model_bundle(tmp_path, target):
     assert destination.read_bytes() == b"protected model asset"
 
 
+def test_publication_paths_expand_home_for_local_depth_assets(tmp_path, monkeypatch):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    bundle = tmp_path / "depth-small"
+    bundle.mkdir()
+    config = bundle / "config.json"
+    config.write_text("protected model config", encoding="utf-8")
+    assert Path("~/depth-small").expanduser() == bundle
+    with pytest.raises(ValueError):
+        reporting.validate_artifact_paths(
+            config, tmp_path / "source.mp4", tmp_path / "out.mp4",
+            asset_paths=["~/depth-small"],
+        )
+    assert config.read_text(encoding="utf-8") == "protected model config"
+
+
 def test_unknown_source_metadata_is_explicit_and_excluded_from_strict_groups(tmp_path, monkeypatch):
     from dataclasses import replace
     from cv_human_video_matting import evaluation

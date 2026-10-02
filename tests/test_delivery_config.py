@@ -110,6 +110,53 @@ def test_depth_settings_and_interval_are_applied_to_resized_frames(tmp_path, mon
                for dtype, minimum, maximum in alpha_ranges)
 
 
+def test_local_depth_anything_checkpoint_reaches_video_pipeline(tmp_path, monkeypatch):
+    source = tmp_path / "in.mp4"
+    make_video(source, frames=2)
+    checkpoint = tmp_path / "depth-anything"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text(
+        '{"model_type":"depth_anything","depth_estimation_type":"relative",'
+        '"backbone":null,"backbone_config":{"model_type":"dinov2",'
+        '"hidden_size":384,"patch_size":14}}',
+        encoding="utf-8",
+    )
+    (checkpoint / "preprocessor_config.json").write_text("{}", encoding="utf-8")
+    (checkpoint / "model.safetensors").write_bytes(b"local-test-weights")
+    loaded = []
+
+    class FakeDepth:
+        def __init__(self, **kwargs):
+            loaded.append(kwargs)
+
+        def estimate(self, frame):
+            return np.full(frame.shape[:2], 0.75, np.float32)
+
+        def person_distance(self, depth, alpha):
+            return 0.25, "Near"
+
+    monkeypatch.setattr(pipeline, "DepthEstimator", FakeDepth)
+    stats = pipeline.process_video(
+        source, tmp_path / "out.mp4", RecordingRunner(), "green",
+        enable_depth=True, depth_model="DepthAnythingV2_small",
+        depth_checkpoint=checkpoint,
+    )
+    assert stats.frames == 2
+    assert loaded[0]["checkpoint_path"] == checkpoint
+    assert loaded[0]["model_type"] == "DepthAnythingV2_small"
+
+
+def test_depth_anything_preflight_rejects_missing_model_before_output(tmp_path):
+    output = tmp_path / "out.mp4"
+    with pytest.raises(FileNotFoundError, match="No model is downloaded"):
+        pipeline.validate_video_request(
+            tmp_path / "missing-input.mp4", output, "green", enable_depth=True,
+            depth_model="DepthAnythingV2_small",
+            depth_checkpoint=tmp_path / "missing-depth-model",
+        )
+    assert not output.exists()
+
+
 def test_live_frame_uses_custom_color_with_uint8_alpha():
     frame = np.full((10, 10, 3), 200, dtype=np.uint8)
     output, _ = pipeline.render_matting_frame(

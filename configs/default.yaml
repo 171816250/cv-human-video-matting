@@ -29,6 +29,9 @@ postprocess:
 depth:
   enabled: false
   model: MiDaS_small
+  # Required only for DepthAnythingV2_small: a prepared local HF model directory.
+  # The application never downloads this optional model while processing.
+  checkpoint: null
   interval: 5
   # Relative inverse-depth thresholds: higher values indicate nearer regions, not meters.
   thresholds:

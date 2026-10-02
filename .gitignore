@@ -7,6 +7,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
 coverage.xml
 htmlcov/
 
@@ -16,6 +17,17 @@ htmlcov/
 venv/
 env/
 .conda/
+
+# Local credentials and private evidence
+.env
+.env.*
+!.env.example
+credentials.json
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519
 
 # IDE
 .idea/
@@ -32,6 +44,7 @@ data/output/*
 !data/output/.gitkeep
 runs/
 logs/
+dist/
 
 # Media and model files
 *.mp4

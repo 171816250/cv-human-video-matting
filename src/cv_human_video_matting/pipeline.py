@@ -13,7 +13,7 @@ from time import perf_counter
 import cv2
 import numpy as np
 
-from cv_human_video_matting.depth import DepthEstimator, draw_distance_label
+from cv_human_video_matting.depth import DepthEstimator, draw_distance_label, validate_depth_checkpoint
 from cv_human_video_matting.io.video import VideoInfo, probe_video
 from cv_human_video_matting.matting.base import MattingRunner
 from cv_human_video_matting.postprocess import TemporalAlphaSmoother, refine_alpha
@@ -279,6 +279,7 @@ def validate_video_request(
     depth_interval: int = 5,
     resize_short: int | None = None,
     depth_model: str = "MiDaS_small",
+    depth_checkpoint: str | Path | None = None,
     depth_near: float = 0.66,
     depth_mid: float = 0.33,
     background_color_bgr: tuple[int, int, int] = (0, 255, 0),
@@ -309,10 +310,14 @@ def validate_video_request(
             "temporal_mode": temporal_mode, "temporal_motion_threshold": temporal_motion_threshold,
         },
         "depth": {
-            "enabled": enable_depth, "model": depth_model, "interval": depth_interval,
+            "enabled": enable_depth, "model": depth_model,
+            "checkpoint": str(depth_checkpoint) if depth_checkpoint is not None else None,
+            "interval": depth_interval,
             "thresholds": {"near": depth_near, "mid": depth_mid},
         },
     })
+    if enable_depth and mode not in {"alpha", "transparent"}:
+        validate_depth_checkpoint(depth_model, depth_checkpoint)
     _validate_background_color(background_color_bgr)
     requested_output = Path(output_path)
     source = Path(input_path)
@@ -367,6 +372,7 @@ def process_video(
     device: str = "cpu",
     resize_short: int | None = None,
     depth_model: str = "MiDaS_small",
+    depth_checkpoint: str | Path | None = None,
     depth_near: float = 0.66,
     depth_mid: float = 0.33,
     background_color_bgr: tuple[int, int, int] = (0, 255, 0),
@@ -390,7 +396,8 @@ def process_video(
         edge_feather=edge_feather, mask_open=mask_open, mask_close=mask_close,
         temporal_smooth=temporal_smooth, temporal_blend=temporal_blend,
         enable_depth=enable_depth, depth_interval=depth_interval, resize_short=resize_short,
-        depth_model=depth_model, depth_near=depth_near, depth_mid=depth_mid,
+        depth_model=depth_model, depth_checkpoint=depth_checkpoint,
+        depth_near=depth_near, depth_mid=depth_mid,
         background_color_bgr=background_color_bgr, temporal_mode=temporal_mode,
         temporal_motion_threshold=temporal_motion_threshold,
     )
@@ -404,11 +411,13 @@ def process_video(
                              motion_threshold=temporal_motion_threshold)
         if temporal_smooth else None
     )
+    depth_options = {"device": device, "model_type": depth_model,
+                     "near_threshold": depth_near, "mid_threshold": depth_mid}
+    if depth_checkpoint is not None:
+        depth_options["checkpoint_path"] = depth_checkpoint
     depth_estimator = (
-        DepthEstimator(device=device, model_type=depth_model,
-                       near_threshold=depth_near, mid_threshold=depth_mid)
-        if enable_depth and mode not in {"alpha", "transparent"}
-        else None
+        DepthEstimator(**depth_options)
+        if enable_depth and mode not in {"alpha", "transparent"} else None
     )
     reset = getattr(runner, "reset", None)
     if callable(reset):

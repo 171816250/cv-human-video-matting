@@ -28,7 +28,7 @@ import cv2
 import gradio as gr
 import numpy as np
 
-from cv_human_video_matting.depth import DepthEstimator
+from cv_human_video_matting.depth import DepthEstimator, validate_depth_checkpoint
 from cv_human_video_matting.io.video import ensure_browser_playable_video, export_video_for_delivery
 from cv_human_video_matting.matting.base import MattingRunner
 from cv_human_video_matting.matting.factory import create_matting_runner
@@ -137,11 +137,15 @@ def _model_assets(model, enable_depth=False):
     configured = _canonical_model(config_value(_ACTIVE_CONFIG, "matting.model", "rvm_mobilenetv3"))
     bundle = config_value(_ACTIVE_CONFIG, "matting.bundle")
     selected = _canonical_model(model)
+    depth_model = config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small")
+    depth_checkpoint = config_value(_ACTIVE_CONFIG, "depth.checkpoint")
     if bundle:
         if selected not in {configured, "dummy"}:
             raise ValueError("离线模型包模式已固定模型；切换模型需准备对应模型包并重新启动。")
         if enable_depth:
-            raise ValueError("离线RVM模型包不包含远近标注模型，请关闭相对远近标注。")
+            if depth_model != "DepthAnythingV2_small" or not depth_checkpoint:
+                raise ValueError("离线RVM模型包不包含远近标注模型；请配置独立的Depth Anything本地目录或关闭标注。")
+            validate_depth_checkpoint(depth_model, depth_checkpoint)
     if selected == configured:
         return config_value(_ACTIVE_CONFIG, "matting.checkpoint"), bundle
     return None, None
@@ -172,6 +176,7 @@ def _live_cache_for(
     key = (model, device, checkpoint, bundle_path, ratio, bool(temporal_smooth),
            float(temporal_blend), temporal_mode, temporal_motion_threshold,
            config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
+           config_value(_ACTIVE_CONFIG, "depth.checkpoint"),
            config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
            config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33))
     if cache.runner is None or cache.key != key:
@@ -277,9 +282,10 @@ def _run_batch_demo(
     output_path = _timestamped_output_path(mode)
     final_directory = output_path.with_suffix("")
     checkpoint, bundle_path = _model_assets(model, enable_depth=enable_depth)
+    depth_checkpoint = config_value(_ACTIVE_CONFIG, "depth.checkpoint")
     from cv_human_video_matting.reporting import validate_artifact_paths
     validate_artifact_paths(final_directory / "result.json", video_path, final_directory,
-                            asset_paths=(background_path, checkpoint, bundle_path))
+                            asset_paths=(background_path, checkpoint, bundle_path, depth_checkpoint))
     ensure_dir(output_path.parent)
     started_at = perf_counter()
     with TemporaryDirectory(prefix=".batch-", dir=output_path.parent) as staging:
@@ -295,6 +301,7 @@ def _run_batch_demo(
             enable_depth=enable_depth, depth_interval=depth_interval,
             resize_short=resize_short,
             depth_model=config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
+            depth_checkpoint=depth_checkpoint,
             depth_near=config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
             depth_mid=config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33),
             background_color_bgr=color_bgr,
@@ -348,6 +355,7 @@ def _run_batch_demo(
             "downsample_ratio": config_value(_ACTIVE_CONFIG, "matting.downsample_ratio", "auto"),
             "resize_short": resize_short,
             "depth_model": config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
+            "depth_checkpoint": str(depth_checkpoint) if depth_checkpoint else None,
             "depth_near": config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
             "depth_mid": config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33),
             "background_color": background_color,
@@ -518,10 +526,16 @@ def render_live_frame(
     started_at = perf_counter()
     if enable_depth and mode != "alpha":
         if cache.depth_estimator is None:
-            cache.depth_estimator = DepthEstimator(device=actual_device,
-                model_type=config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
-                near_threshold=config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
-                mid_threshold=config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33))
+            depth_options = {
+                "device": actual_device,
+                "model_type": config_value(_ACTIVE_CONFIG, "depth.model", "MiDaS_small"),
+                "near_threshold": config_value(_ACTIVE_CONFIG, "depth.thresholds.near", 0.66),
+                "mid_threshold": config_value(_ACTIVE_CONFIG, "depth.thresholds.mid", 0.33),
+            }
+            depth_checkpoint = config_value(_ACTIVE_CONFIG, "depth.checkpoint")
+            if depth_checkpoint is not None:
+                depth_options["checkpoint_path"] = depth_checkpoint
+            cache.depth_estimator = DepthEstimator(**depth_options)
         if (cache.depth_map is None or cache.depth_map.shape != frame_bgr.shape[:2]
                 or cache.frames % max(1, int(depth_interval)) == 0):
             cache.depth_map = cache.depth_estimator.estimate(frame_bgr)
@@ -953,7 +967,10 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
     temporal_blend_default = float(config_value(config, "postprocess.temporal_alpha", 0.75))
     temporal_mode_default = config_value(config, "postprocess.temporal_mode", "ema")
     temporal_threshold_default = config_value(config, "postprocess.temporal_motion_threshold", 0.15)
-    enable_depth_default = bool(config_value(config, "depth.enabled", False)) and not offline_bundle
+    depth_available = (not offline_bundle or
+        (config_value(config, "depth.model") == "DepthAnythingV2_small" and
+         bool(config_value(config, "depth.checkpoint"))))
+    enable_depth_default = bool(config_value(config, "depth.enabled", False)) and depth_available
     depth_interval_default = int(config_value(config, "depth.interval", 5))
 
     with gr.Blocks(
@@ -1075,7 +1092,7 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                         enable_depth_input = gr.Checkbox(
                                             label="启用相对远近标注",
                                             value=enable_depth_default,
-                                            interactive=not offline_bundle,
+                                            interactive=depth_available,
                                             info="Near/Mid/Far是相对远近，不表示实际米数；开启会增加处理时间。",
                                         )
                                         depth_interval_input = gr.Slider(
@@ -1251,7 +1268,7 @@ def build_demo(config: dict | None = None) -> gr.Blocks:
                                             info="大于0且不超过1；越小越容易跟随变化，也可能增加闪烁。",
                                         )
                                     live_depth = gr.Checkbox(label="Relative Distance (Near / Mid / Far)", value=False,
-                                                             interactive=not offline_bundle)
+                                                             interactive=depth_available)
                                     live_depth_interval = gr.Slider(label="Depth Update Interval", minimum=1, maximum=30, value=5, step=1)
                                     live_session = gr.State(LiveRunnerCache())
                                     reset_live_button = gr.Button(
