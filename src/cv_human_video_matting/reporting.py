@@ -125,7 +125,8 @@ def _environment(device: str) -> dict:
     import torch
 
     dependencies = {}
-    for name in ("torch", "torchvision", "numpy", "opencv-python", "gradio", "imageio-ffmpeg",
+    for name in ("torch", "torchvision", "numpy", "opencv-python", "opencv-python-headless",
+                 "gradio", "imageio-ffmpeg",
                  "transformers", "timm", "safetensors"):
         try:
             dependencies[name] = version(name)

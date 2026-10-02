@@ -69,9 +69,15 @@ def setup_run(tmp_path, monkeypatch):
 def handshake(bundle, code):
     shared = {"protocol": 1, "model": "rvm_mobilenetv3", "device": "cpu",
               "bundle_content_sha256": bundle["content_sha256"]}
+    def installed(name):
+        try:
+            return rehearsal.version(name)
+        except rehearsal.PackageNotFoundError:
+            return None
+
     environment = {"python": platform.python_version(), "platform": platform.platform(), "device": "cpu",
-                   "device_error": None, "packages": {name: rehearsal.version(name) for name in
-                   ("torch", "torchvision", "numpy", "opencv-python")}}
+                   "device_error": None, "packages": {name: installed(name) for name in
+                   ("torch", "torchvision", "numpy", "opencv-python", "opencv-python-headless")}}
     return ({"type": "hello", **shared}, {"type": "ready", **shared,
         "package_version": code["version"], "source_sha256": code["source_sha256"],
         "model_content_sha256": bundle["content_sha256"], "weights": bundle["files"][0],
@@ -179,6 +185,32 @@ def test_ready_must_confirm_loaded_source_weights_and_environment(setup_run, cha
     ready[changed] = {} if changed == "environment" else "wrong"
     with pytest.raises(ValueError, match="mismatch|environment"):
         rehearsal._check_ready(hello, ready, bundle, code, "cpu")
+
+
+def test_headless_opencv_is_recorded_and_accepted(setup_run, monkeypatch):
+    from cv_human_video_matting import reporting
+
+    actual_client_version = rehearsal.version
+    actual_server_version = reporting.version
+
+    def headless_version(actual):
+        def lookup(name):
+            if name == "opencv-python":
+                raise rehearsal.PackageNotFoundError(name)
+            if name == "opencv-python-headless":
+                return "4.10.0.84"
+            return actual(name)
+        return lookup
+
+    monkeypatch.setattr(rehearsal, "version", headless_version(actual_client_version))
+    monkeypatch.setattr(reporting, "version", headless_version(actual_server_version))
+    _, bundle, code = setup_run
+    hello, ready = handshake(bundle, code)
+    packages = ready["environment"]["packages"]
+    assert packages["opencv-python"] is None
+    assert packages["opencv-python-headless"] == "4.10.0.84"
+    assert reporting._environment("cpu")["packages"]["opencv-python-headless"] == "4.10.0.84"
+    rehearsal._check_ready(hello, ready, bundle, code, "cpu")
 
 
 @pytest.mark.parametrize("failure", ["spawn", "startup_exit", "startup_timeout", "request_timeout", "bad_frame", "interrupt"])

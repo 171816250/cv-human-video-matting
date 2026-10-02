@@ -1,0 +1,11 @@
+# Linux GPU realtime service only. Install the matching Torch/TorchVision CUDA pair first.
+# This profile deliberately excludes Gradio, desktop OpenCV, and Windows lock files.
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+Pillow==10.4.0
+PyYAML==6.0.2
+fastapi==0.111.1
+starlette==0.37.2
+uvicorn>=0.23.2,<1
+websockets>=11,<12
+packaging==25.0

@@ -194,9 +194,19 @@ def _check_ready(hello, ready, bundle, code, requested_device):
         raise ValueError("Service environment does not confirm the inference device")
     if environment.get("python") != platform.python_version() or environment.get("platform") != platform.platform():
         raise ValueError("Service environment differs from the selected interpreter/platform")
-    for name in ("torch", "torchvision", "numpy", "opencv-python"):
+    for name in ("torch", "torchvision", "numpy"):
         if environment.get("packages", {}).get(name) != version(name):
             raise ValueError(f"Service package version mismatch: {name}")
+    opencv = {}
+    for name in ("opencv-python", "opencv-python-headless"):
+        try:
+            opencv[name] = version(name)
+        except PackageNotFoundError:
+            opencv[name] = None
+        if environment.get("packages", {}).get(name) != opencv[name]:
+            raise ValueError(f"Service package version mismatch: {name}")
+    if not any(opencv.values()):
+        raise ValueError("Neither supported OpenCV distribution is installed")
 
 
 def _check_frame(message, payload, sequence, width, height, device):
@@ -326,7 +336,8 @@ def run_rehearsal(args):
                        {"kind": "synthetic", "generator": "moving-shapes-v1", "width": 1280, "height": 720})
     output.mkdir(parents=True, exist_ok=False)
     packages = {}
-    for name in ("torch", "torchvision", "numpy", "opencv-python", "websockets", "fastapi", "uvicorn"):
+    for name in ("torch", "torchvision", "numpy", "opencv-python", "opencv-python-headless",
+                 "websockets", "fastapi", "uvicorn"):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:
