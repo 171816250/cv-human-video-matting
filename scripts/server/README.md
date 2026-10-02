@@ -24,7 +24,7 @@ bash /data/coding/cv-human-video-matting/current/scripts/server/server.sh start
 bash /data/coding/cv-human-video-matting/current/scripts/server/server.sh status
 ```
 
-`install-archive` 验证 ZIP 与哈希、建立共享目录、安装独立依赖，然后完成 CUDA 张量与 120 帧 RVM WebSocket 真实推理。默认安装 Torch 2.10.0、TorchVision 0.25.0、CUDA cu128；不同显卡可设置 `MATTE_TORCH_VERSION`、`MATTE_VISION_VERSION`、`MATTE_CUDA_CHANNEL`。实时服务只监听 `127.0.0.1:7861`，其他电脑通过 SSH 转发到本机访问。该后台进程不依赖 systemd；容器重启后须再次执行 `start`。
+`install-archive` 验证 ZIP 与哈希、建立共享目录、安装独立依赖，然后完成 CUDA 张量与 120 帧 RVM WebSocket 真实推理。默认安装 Torch 2.10.0、TorchVision 0.25.0、CUDA cu128；不同显卡可设置 `MATTE_TORCH_VERSION`、`MATTE_VISION_VERSION`、`MATTE_CUDA_CHANNEL`。实时服务只监听 `127.0.0.1:7861`，其他电脑通过 SSH 转发到本机访问。该后台进程不依赖 systemd；容器重启后须再次执行 `start`。若旧进程已不存在，脚本会清理残留 PID 文件；若进程号已被其他程序复用，需先人工核实。
 
 已有同名版本目录时使用新的版本名；安装失败若遗留未启用目录，同名重试前先核实残留并清理，或改用另一个版本名。`current` 只会在安装与真实推理验证成功后切换。
 

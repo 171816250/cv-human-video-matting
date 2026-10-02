@@ -172,7 +172,12 @@ start_server() {
   if [[ -f "$PID_FILE" ]]; then
     pid="$(cat "$PID_FILE")"
     if is_ours "$pid" "$src"; then die "Realtime server already running as PID $pid"; fi
-    die "Stale/unrecognized PID file: $PID_FILE; inspect it before removal"
+    if [[ "$pid" =~ ^[0-9]+$ && ! -e "/proc/$pid" ]]; then
+      rm -- "$PID_FILE"
+      note "Removed stale PID file for exited process $pid"
+    else
+      die "Stale/unrecognized PID file: $PID_FILE; inspect it before removal"
+    fi
   fi
   logfile="$APP_HOME/shared/logs/realtime-$(date -u +%Y%m%dT%H%M%SZ).log"
   (
