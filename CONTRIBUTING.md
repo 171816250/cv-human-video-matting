@@ -2,6 +2,13 @@
 
 本项目接受功能修复、测试、文档和教学案例贡献。首次参与可先提交问题，说明使用场景、预期结果和可复现步骤，再通过 Pull Request 提交变更。
 
+## 选择贡献分支
+
+- [GitHub](https://github.com/171816250/cv-human-video-matting)：从 `main` 创建功能分支，向 `main` 发起 Pull Request。
+- [Gitee](https://gitee.com/ciyechenchen/cv-human-video-matting)：当前承载正式版的分支为 `feature/incubation-evidence-depth-2026-10-02`，从该分支创建功能分支并向它发起 Pull Request。原 `main` 尚未同步本次正式版，请先核对目标分支内容。
+
+首次迁移基线为 `v1.0.0` 对应的提交 `35f6ed9de7b047c912481307468a33a2f7a5dd85`。后续默认分支如有调整，以目标平台的维护说明为准。相同问题可以在一个平台完成讨论和评审，由维护者按[同步交接指引](docs/GITHUB_MIGRATION.md)同步已合并变更。
+
 ## 本地验证
 
 先按 README 安装运行依赖，再执行：
@@ -18,7 +25,7 @@ python -B -m pytest -q --cov=cv_human_video_matting --cov-report=term-missing --
 
 ## 提交要求
 
-1. 从稳定分支创建功能分支，一个 PR 解决一个明确问题。
+1. 从上述目标平台的贡献基线创建功能分支，一个 PR 解决一个明确问题。
 2. 说明问题、变更后的行为、复现步骤和实际验证结果。
 3. 修改输出、模型接口或运行参数时，同步更新教程和必要的回归测试。
 4. 不提交模型权重、个人视频、运行日志、账号信息或申报书中的个人资料。
