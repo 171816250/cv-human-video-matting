@@ -8,6 +8,16 @@
 
 本次还整理了实验性 Depth Anything V2 Small 本地后端、私人案例证据工具、服务器备份恢复说明，并修复 BiRefNet 返回接口报错。工程测试、真实模型运行和真人素材效果分别记录：Depth Anything 的真实权重仅在本机 CPU 合成帧上验证，BiRefNet 本次修复由离线回归测试覆盖，不能据此宣称它们已完成真人画质或持续速度验收。
 
+## 代码托管与反馈
+
+- [GitHub 仓库](https://github.com/171816250/cv-human-video-matting)：默认分支为 `main`，提供 GitHub Actions 测试和 Pull Request 入口。
+- [Gitee 仓库](https://gitee.com/ciyechenchen/cv-human-video-matting)：保留国内访问、原有协作历史和[正式发行入口](https://gitee.com/ciyechenchen/cv-human-video-matting/releases)。
+- [参与贡献](CONTRIBUTING.md)与[双平台同步交接](docs/GITHUB_MIGRATION.md)：说明贡献基线、正式标签及后续同步方法。
+
+[![GitHub Actions 运行状态](https://github.com/171816250/cv-human-video-matting/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/171816250/cv-human-video-matting/actions/workflows/tests.yml)
+
+徽章与 Actions 页面反映 GitHub 的实际运行状态；本地测试结果不替代平台构建。两平台的 Stars、Forks、成员和发行等数据分别统计，以各自页面记录为准。
+
 ## 快速开始
 
 完整步骤见[独立环境安装与启动](docs/INSTALLATION.md)。按步骤建立 `.venv` 并准备离线模型包后，可双击根目录 **Start-Demo.cmd**，检查通过后在浏览器打开显示的本地地址。新电脑需先按说明安装环境和准备模型。
