@@ -150,6 +150,7 @@ py -3.10 -m venv .venv
 
 - [答辩操作与交付清单](docs/DEFENSE_GUIDE.md)
 - [v1.0.0 发行说明](docs/RELEASE_v1.0.0.md)、[本轮验证记录](docs/VALIDATION_v1.0.0.md)、[当前交付状态](PROJECT_COMPLETE.md)
+- [GitHub 平台验证记录（bd1d260，手动触发）](docs/VALIDATION_GITHUB_2026-10-23.md)
 - [历史 rc4 交付说明](docs/RELEASE_v0.2.0rc4.md)、[历史 rc4 验证记录](docs/VALIDATION_v0.2.0rc4.md)
 - [上一版独立环境记录](docs/RELEASE_v0.2.0rc3.md)、[上一版验证记录](docs/VALIDATION_v0.2.0rc3.md)
 - [实时预览说明](docs/REALTIME.md)、[实时验证记录](docs/VALIDATION_v0.2.0rc4.md)
