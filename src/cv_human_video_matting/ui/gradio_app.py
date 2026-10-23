@@ -475,8 +475,7 @@ def run_demo_for_ui(
 
 
 def cancel_batch_for_ui(request: gr.Request = gr.Request()):
-    # A None default becomes Optional[Request] in Python 3.9/3.10 type hints;
-    # Gradio 4.37 only injects the session for the exact Request annotation.
+    # Gradio 4.37 只向精确的 Request 类型注入会话；默认值为 None 会变成 Optional。
     session_id = getattr(request, "session_hash", None)
     if session_id and _BATCH_JOBS.cancel(session_id):
         return "已收到停止请求；正在完成当前帧或模型加载，并清理临时文件。"
@@ -571,7 +570,7 @@ def render_live_frame(
 
 
 def render_live_frame_for_ui(*args):
-    # gr.State supplies an independent cache for each browser session.
+    # 每个浏览器会话通过 gr.State 保存自己的模型缓存。
     cache = args[-1]
     controls = args[:-1]
     temporal_settings = {}
@@ -922,8 +921,7 @@ def _build_css() -> str:
 def build_demo(config: dict | None = None) -> gr.Blocks:
     config = config or {}
     validate_project_config(config)
-    # Publish config so batch/live callbacks resolve config-only settings
-    # (e.g. matting.checkpoint) the same way the CLI does.
+    # 将配置交给处理回调，读取 checkpoint 等界面未提供的参数。
     global _ACTIVE_CONFIG
     _ACTIVE_CONFIG = config
     configured_model = _canonical_model(config_value(config, "matting.model", "rvm_mobilenetv3"))

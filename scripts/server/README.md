@@ -19,7 +19,7 @@ python -B scripts/server/portable.py verify --archive data/output/server-deploym
 
 ```bash
 export MATTE_SERVER_ROOT=/data/coding/cv-human-video-matting
-bash server.sh install-archive /data/incoming/server-deployment.zip v0.2.0rc4
+bash server.sh install-archive /data/incoming/server-deployment.zip v1.0.0
 bash /data/coding/cv-human-video-matting/current/scripts/server/server.sh start
 bash /data/coding/cv-human-video-matting/current/scripts/server/server.sh status
 ```

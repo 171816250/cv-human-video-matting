@@ -54,11 +54,9 @@ def parse_background_color(value: str) -> tuple[int, int, int]:
 
 
 def validate_project_config(config: dict[str, Any]) -> None:
-    """Reject invalid explicit project values before loading models or writing output.
+    """加载模型和写入结果前，检查配置值及 YAML 类型。
 
-    Missing values retain application defaults. The legacy coercion helpers below
-    remain available for callers, but a configuration file must have correct YAML
-    types so a typo cannot silently switch an experiment to a different setting.
+    未填写的项目沿用默认值；显式填写的值不做宽松类型转换。
     """
     if not isinstance(config, dict):
         raise ValueError("Config root must be a mapping.")

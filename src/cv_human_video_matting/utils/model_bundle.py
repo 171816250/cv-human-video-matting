@@ -1,7 +1,6 @@
-"""Portable, hash-verified RVM code and weights copied from an existing local cache.
+"""从本机缓存整理和校验 RVM 模型包，不联网下载。
 
-No function in this module downloads models. The manifest records local bytes;
-it is an integrity record, not an upstream signature or an inference guarantee.
+清单用于核对文件内容，不代表上游签名或推理效果保证。
 """
 
 from __future__ import annotations
@@ -76,11 +75,10 @@ def _safe_relative(value) -> str:
 
 
 def verify_model_bundle(path, expected_model=None) -> dict:
-    """Verify all recorded files and return manifest plus resolved paths and identity.
+    """校验清单中的文件并返回模型包信息、绝对路径及内容标识。
 
-    Added source/weight files, missing files, size changes and SHA256 changes fail.
-    Python bytecode caches created by a previous local run are ignored. A bundle
-    may be moved without changing its stable ``content_sha256`` identity.
+    文件增删、大小或哈希变化均报错；忽略运行产生的字节码缓存。
+    移动模型包目录不会改变 content_sha256。
     """
     root = Path(path).resolve()
     if not root.is_dir():

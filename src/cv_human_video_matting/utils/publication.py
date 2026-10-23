@@ -1,8 +1,7 @@
-"""Publish prepared local artifacts together, with rollback on ordinary failures.
+"""发布已准备好的结果文件，普通异常时尝试回滚。
 
-Each replacement is atomic on its destination filesystem. The set of files is
-not a single filesystem transaction and is not guaranteed atomic across a crash
-or power loss. Existing files are backed up before any destination changes.
+替换前先备份旧文件；单个文件的替换是原子的。
+多个文件不构成一次文件系统事务，不保证断电或崩溃时整体回滚。
 """
 
 from __future__ import annotations
@@ -72,12 +71,10 @@ def _make_parents(parent: Path, created: list[Path]) -> None:
 
 
 def publish_artifacts(items: list[PublicationItem]) -> None:
-    """Prepare all copies/backups, publish each target, and roll back on failure.
+    """先准备副本和备份，再逐项发布；失败时恢复旧文件。
 
-    New files are linked exclusively from a sibling prepared copy, so a competing
-    new file is never overwritten. Existing files use atomic replacements. On
-    rollback, only the exact inode published here can be restored/removed; if a
-    concurrent edit prevents restoration, backups are retained and identified.
+    新文件以独占方式创建，已有文件原子替换。
+    仅回滚本次发布且未被其他程序修改的文件；无法恢复时保留备份位置。
     """
     items = [PublicationItem(Path(item.staged), Path(item.destination), item.replace_existing)
              for item in items]
@@ -154,9 +151,7 @@ def publish_artifacts(items: list[PublicationItem]) -> None:
                 try:
                     shutil.rmtree(temporary)
                 except OSError as cleanup_error:
-                    # A leftover private backup must not turn an already
-                    # completed transaction into a reported publication failure,
-                    # or hide the original error after a successful rollback.
+                    # 临时目录清理失败只记日志，不把成功发布误报为失败，也不覆盖原异常。
                     logging.getLogger(__name__).warning(
                         "Could not clean publication temporary directory %s: %s",
                         temporary, cleanup_error,

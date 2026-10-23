@@ -11,17 +11,14 @@ def cuda_available() -> bool:
 
         return bool(torch.cuda.is_available())
     except Exception:
-        # A broken torch/CUDA install can raise OSError/RuntimeError (e.g. a
-        # missing DLL on Windows) rather than ImportError; degrade to CPU.
+        # DLL 缺失等异常也按 CUDA 不可用处理；是否回退 CPU 由调用方决定。
         return False
 
 
 def resolve_device(requested: str | None = "auto") -> str:
-    """Resolve auto/cuda/cpu requests to a concrete inference device.
+    """解析推理设备；只有 auto 允许回退到 CPU。
 
-    Only ``auto`` may fall back to CPU. Explicit CUDA requests fail early if
-    unavailable, and indexed requests must refer to a visible CUDA device.
-    This function does not change PyTorch's process-wide current device.
+    显式 CUDA 不可用或设备编号越界时直接报错，不改变进程的当前设备。
     """
     if requested is None:
         requested = "auto"

@@ -92,7 +92,7 @@ class BiRefNetRunner(MattingRunner):
             frame_bgr: Input frame in BGR format (HxWx3, uint8).
 
         Returns:
-            MattingResult with alpha matte (no foreground or state).
+            MattingResult with normalized alpha; foreground is not estimated.
         """
         h, w = frame_bgr.shape[:2]
 
@@ -142,7 +142,6 @@ class BiRefNetRunner(MattingRunner):
         return MattingResult(
             alpha=alpha_np,
             foreground=None,  # BiRefNet only outputs alpha
-            state=None,  # No temporal state
         )
 
     def reset(self) -> None:

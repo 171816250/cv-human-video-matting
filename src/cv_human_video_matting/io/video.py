@@ -1,4 +1,4 @@
-"""Video probing and simple frame-copy utilities."""
+"""探测视频信息、读写帧，并导出可在浏览器播放的视频。"""
 
 from __future__ import annotations
 
@@ -160,8 +160,7 @@ def _reap_encoder(process: subprocess.Popen) -> None:
 
 
 def _run_encoder(command: list[str], should_cancel: CancelCallback | None) -> None:
-    # A file-backed stderr sink cannot fill a PIPE and deadlock while the main
-    # thread polls for cancellation. Only the tail is read for error reporting.
+    # 将编码错误写入临时文件，避免管道写满后阻塞取消检查；报错时只读取末尾。
     with tempfile.TemporaryFile(mode="w+b") as error_log:
         process = None
         try:
@@ -201,15 +200,11 @@ def export_video_for_delivery(
     preserve_audio: bool = True,
     should_cancel: CancelCallback | None = None,
 ) -> Path:
-    """Atomically export H.264/AAC MP4, keeping audio within the processed duration.
+    """导出 H.264/AAC MP4，音轨截到已处理视频的时长。
 
-    ``source_path`` supplies the original video's optional first audio track. If
-    omitted, audio is taken from ``processed_path``. A silent source is valid.
-    Odd video dimensions are padded by at most one pixel for yuv420p support.
-    The processed file may be replaced in place, but an explicitly supplied
-    original source can never be used as the output. Conversion failures raise
-    an error and leave any existing output untouched. Cancellation terminates
-    and reaps FFmpeg before raising ProcessingCancelled.
+    优先使用 source_path 的首条音轨，未传入时从处理后视频取音；无音轨也可导出。
+    奇数宽高最多补一像素以兼容 yuv420p。允许替换处理后文件，不覆盖显式原视频。
+    转换失败保留旧结果；取消时先结束并回收 FFmpeg，再抛出 ProcessingCancelled。
     """
     check_cancelled(should_cancel)
     processed = Path(processed_path)
@@ -301,11 +296,10 @@ def ensure_browser_playable_video(
     *,
     strict: bool = False,
 ) -> Path:
-    """Return a browser-compatible copy, preserving audio when available.
+    """返回可在浏览器播放的视频副本，并尽量保留音轨。
 
-    Legacy callers fall back to the input when conversion is unavailable. Use
-    ``strict=True`` to report conversion failures instead. Cached and freshly
-    converted copies must contain valid video frames before being returned.
+    默认转换失败时返回原文件；strict=True 时直接报错。
+    缓存副本和新副本都须通过有效视频帧检查。
     """
     source = Path(video_path)
     if converter is None:

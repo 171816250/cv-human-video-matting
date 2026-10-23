@@ -1,8 +1,7 @@
-"""Bounded JPEG WebSocket preview, independent of Gradio's global UI state.
+"""独立于 Gradio 状态的单会话 JPEG 实时预览服务。
 
-Protocol 1: hello -> ready -> binary JPEG requests. Each response is a ``frame``
-JSON message followed by one JPEG message. The client must wait for that JPEG
-before sending its next frame. The CLI additionally bounds the transport queue.
+协议 1：hello → ready；客户端发送 JPEG，服务端依次返回 frame JSON 和 JPEG。
+客户端收完上一帧再发送下一帧；传输队列上限由 CLI 设置。
 """
 
 from __future__ import annotations
@@ -75,7 +74,7 @@ def _origin_allowed(websocket: WebSocket) -> bool:
 
 
 def decode_jpeg(payload: bytes) -> np.ndarray:
-    """Inspect JPEG dimensions before allocating its decoded raster."""
+    """先检查 JPEG 头部尺寸，防止解码过大的图片。"""
     if not payload or len(payload) > MAX_JPEG_BYTES:
         raise ProtocolError("JPEG frame exceeds the 2 MiB limit or is empty.", "frame_size", 1009)
     if not payload.startswith(b"\xff\xd8") or not payload.endswith(b"\xff\xd9"):
@@ -197,7 +196,7 @@ class RealtimeSession:
 
 
 async def _worker(function, *args):
-    """Cancellation must not release the session while its worker is still active."""
+    """取消请求后仍等待工作线程结束，避免提前释放会话名额。"""
     task = asyncio.create_task(asyncio.to_thread(function, *args))
     try:
         return await asyncio.shield(task)
@@ -224,11 +223,11 @@ async def _error(websocket: WebSocket, code: str, message: str, close_code: int)
 
 
 def create_realtime_app(bundle_path, device="cpu", max_width=640, mode="green", frontend_dir=None) -> FastAPI:
-    """Create a local app; callers must bind localhost and use one ASGI worker.
+    """创建实时服务；取得会话名额后才加载模型。
 
-Recommended Uvicorn options: ws_max_size=2*1024*1024, ws_max_queue=1,
-workers=1, proxy_headers=False. No model is loaded until a client has a seat.
-"""
+    建议绑定本机并使用单个 ASGI worker；ws_max_size=2*1024*1024，ws_max_queue=1。
+    默认关闭代理头处理，受信反代由启动参数显式开启。
+    """
     validate_settings(mode, max_width)
     bundle = verify_model_bundle(bundle_path)
     actual_device = resolve_device(device)

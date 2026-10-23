@@ -12,15 +12,13 @@ import torch
 
 from cv_human_video_matting.matting.base import MattingResult
 
-# Explicit upstream branch reference, not an immutable commit. Shared so
-# download tooling and the runtime select the same torch hub cache directory.
+# 下载工具与运行器共用该分支引用和 Torch Hub 缓存；它不是固定提交。
 RVM_HUB_REF = "PeterL1n/RobustVideoMatting:master"
 _MODEL_IMPORT_LOCK = RLock()
 
 
 def _load_bundle_model(bundle, model_name):
-    # RVM imports a top-level `model` package. Keep a previously loaded cache or
-    # another bundle from silently supplying the code for this verified bundle.
+    # 隔离 RVM 的顶层 model 模块，避免误用先前缓存或另一个模型包的代码。
     with _MODEL_IMPORT_LOCK:
         previous = {name: module for name, module in sys.modules.copy().items()
                     if name == "model" or name.startswith("model.")}
@@ -76,7 +74,7 @@ class RVMRunner:
         self._frame_shape = None
 
     def reset(self) -> None:
-        """Discard recurrent state between videos or resolution changes."""
+        """切换视频或分辨率时，清空上一段画面的循环状态。"""
         self._rec = [None, None, None, None]
         self._frame_shape = None
 

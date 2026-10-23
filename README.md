@@ -2,15 +2,15 @@
 
 提供本地网页与命令行入口，支持视频抠像、背景替换、透明PNG序列和摄像头预览。默认使用RVM MobileNetV3；RVM ResNet50、BiRefNet为可选模型。相对远近标注沿用MiDaS，并新增实验性的Depth Anything V2 Small本地后端。
 
-当前处于答辩候选版本准备阶段。工程测试、真实模型运行和真人素材效果评估分别记录，不以短片冒烟测试推导持续实时性能。
+当前版本为 **v1.0.0**，将已完成的批处理、本地网页、GPU 实时预览和部署迁移工具整理为一个可追溯版本。发布状态、标签对应提交和附件以 [Gitee 发行页](https://gitee.com/ciyechenchen/cv-human-video-matting/releases)的实际记录为准；版本说明见 [v1.0.0 发行说明](docs/RELEASE_v1.0.0.md)。
 
-当前候选版本为 **0.2.0rc4**：新增独立 GPU 实时 WebSocket 工作区、逐帧在途控制、浏览器摄像头/本地视频来源、实时 FPS 与延迟指标。基础批处理、CPU 独立环境、离线模型校验、自适应平滑、无损中间视频、失败回滚与运行报告继续保留。
+本版本保留七种渲染模式、H.264/AAC 导出、透明 PNG 序列、离线 RVM 模型包校验、边缘与时间平滑、任务取消、失败回滚和运行报告；独立 WebSocket 工作区支持摄像头或本地视频输入，以及 FPS、延迟和服务端处理时间显示。
 
-后续未发布改进增加可选深度模型的本地准备、私人案例证据收集和Gitee Go配置。Depth Anything真实权重已在本机CPU合成帧上跑通；真人效果、三组授权案例、目标服务器速度及Gitee平台构建仍需分别验收。
+本次还整理了实验性 Depth Anything V2 Small 本地后端、私人案例证据工具、服务器备份恢复说明，并修复 BiRefNet 返回接口报错。工程测试、真实模型运行和真人素材效果分别记录：Depth Anything 的真实权重仅在本机 CPU 合成帧上验证，BiRefNet 本次修复由离线回归测试覆盖，不能据此宣称它们已完成真人画质或持续速度验收。
 
 ## 快速开始
 
-完整步骤见[独立环境安装与启动](docs/INSTALLATION.md)。本机已建立 `.venv` 并准备离线模型包，可双击根目录 **Start-Demo.cmd**，检查通过后在浏览器打开显示的本地地址。新电脑仍需先按说明安装环境和准备模型。
+完整步骤见[独立环境安装与启动](docs/INSTALLATION.md)。按步骤建立 `.venv` 并准备离线模型包后，可双击根目录 **Start-Demo.cmd**，检查通过后在浏览器打开显示的本地地址。新电脑需先按说明安装环境和准备模型。
 
 以下命令以 Windows PowerShell 为例，在仓库根目录运行，建议 Python 3.10。始终使用项目 `.venv`，无须激活环境；macOS/Linux 将 `.\.venv\Scripts\python.exe` 替换为 `.venv/bin/python`，创建环境使用 `python3.10 -m venv .venv`。已有项目环境先运行检查，无须重新安装：
 
@@ -122,20 +122,25 @@ py -3.10 -m venv .venv
 .\.venv\Scripts\python.exe -B -m pytest -q --cov=cv_human_video_matting --cov-report=term --cov-report=xml --cov-fail-under=70
 ```
 
-在代码已提交且无已跟踪文件修改时，生成本地候选包：
+2026-10-23 的本轮工程回归结果为 **724 passed、2 skipped、46 warnings，耗时 58.01 秒；核心包语句覆盖率 91.03%（2599/2855）**，环境为 Windows、Python 3.10.16、pytest 8.4.2 和 CPU 运行依赖。两项跳过与 Windows 目录符号链接权限有关，BiRefNet 的 7 项回归全部通过。本轮没有下载或执行 BiRefNet 真实权重；模型替身与合成音视频测试不代表所有可选模型已完成画质或硬件性能验收。
+
+正式发行附件将从已冻结的 Git 提交生成源码 ZIP，另外提供验证附件、SHA256 清单和使用说明。源码 ZIP 不含本地工作历史、模型权重、私人案例或 Python 环境；模型准备方法见[离线模型说明](docs/OFFLINE_MODEL.md)。公开附件的内容和哈希以发行页为准。
+
+如需在本机保留可恢复的候选包，可在代码已提交且无已跟踪文件修改时运行：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/package_release.py --output-dir ../deliverables/v0.2.0rc4 --evidence data/output/v0.2.0rc4 --evidence weights/offline-rvm-mobilenetv3-rc2
+.\.venv\Scripts\python.exe scripts/package_release.py --output-dir ../deliverables/v1.0.0-local-candidate --evidence weights/offline-rvm-mobilenetv3-rc2
 ```
 
-目标目录必须尚不存在。工具从Git提交打包源码，附明确指定的证据、可恢复的Git历史、SHA256清单与使用说明；不会自动收录未跟踪文件、模型权重或整个运行环境。候选包不等于远端正式Release。
+目标目录必须尚不存在。这个工具仍按本地候选包语义生成 `candidate.zip`，附明确指定的证据、全部本地可达 Git 历史、SHA256 清单与使用说明；不会自动收录未跟踪文件、模型权重或整个运行环境。它不会创建 Gitee Release，其 Git 历史包仅用于本地备份，不随本次公开发行附件发布。
 
 单独打包时可将`--evidence weights/offline-rvm-mobilenetv3-rc2`加入命令；模型包文件会逐一纳入外置清单，同时保留包内原始LICENSE和清单。
 
 离线测试使用模型替身与本地合成音视频，不下载权重。GitHub Actions仅在对应平台触发；另已准备 [Gitee Go配置](.workflow/python-ci.yml)及[开通说明](docs/GITEE_CI.md)，配置目标是完整离线测试集和70%覆盖率门槛。Gitee页面开通、配置解析和实际构建尚未验证，仓库托管、本地测试通过或存在YAML都不代表平台流水线已运行。
 
 - [答辩操作与交付清单](docs/DEFENSE_GUIDE.md)
-- [本版交付说明](docs/RELEASE_v0.2.0rc4.md)、[本版验证记录](docs/VALIDATION_v0.2.0rc4.md)
+- [v1.0.0 发行说明](docs/RELEASE_v1.0.0.md)、[本轮验证记录](docs/VALIDATION_v1.0.0.md)、[当前交付状态](PROJECT_COMPLETE.md)
+- [历史 rc4 交付说明](docs/RELEASE_v0.2.0rc4.md)、[历史 rc4 验证记录](docs/VALIDATION_v0.2.0rc4.md)
 - [上一版独立环境记录](docs/RELEASE_v0.2.0rc3.md)、[上一版验证记录](docs/VALIDATION_v0.2.0rc3.md)
 - [实时预览说明](docs/REALTIME.md)、[实时验证记录](docs/VALIDATION_v0.2.0rc4.md)
 - [申报目标对应清单](docs/INCUBATION_CHECKLIST.md)
@@ -147,6 +152,6 @@ py -3.10 -m venv .venv
 
 透明输出是带alpha的PNG序列，没有音轨，不是透明MP4。深度标注当前对整个人物遮罩生成一个相对标签，尚未实现多人独立测距。BiRefNet与Depth Anything V2 Small属于可选实验后端，不能直接声称达到某项质量或速度指标。真人发丝、弱光、快速运动、长视频和摄像头跨浏览器效果仍需留存评测证据。
 
-大文件放在 `weights/`、`data/input/`、`data/backgrounds/`，结果在 `data/output/`，均不进入Git。离线交付需另外准备模型缓存，源码包不等于完整离线环境。
+模型、输入素材与结果默认分别放在 `weights/`、`data/input/`、`data/backgrounds/` 和 `data/output/`，受 Git 忽略规则保护。它们不随源码 ZIP 自动提供，离线使用需另行准备模型与依赖。当前尚未形成可验证的 Gitee LFS ≥1GB 上传结果；平台配额、实际存储量与普通 Git 仓库大小应分别核实，不能用本地文件夹大小替代。
 
 项目许可证为MulanPSL-2.0；外部模型与权重遵守各自许可证。正式发布和社区指标以平台真实记录为准。

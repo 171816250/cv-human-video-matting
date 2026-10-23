@@ -1,4 +1,4 @@
-"""Command line interface for iterative project milestones."""
+"""视频处理、网页预览、实时服务和环境检查的命令入口。"""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def config_with_model_bundle(config: dict, bundle_path, *, select_model: bool = 
 
 
 def create_matting_runner(**kwargs):
-    """Load inference dependencies only when an inference command needs them."""
+    """创建运行器时再导入推理依赖，避免命令解析阶段提前加载。"""
     from cv_human_video_matting.matting.factory import create_matting_runner as create
     return create(**kwargs)
 
@@ -404,7 +404,7 @@ def main(argv: list[str] | None = None) -> None:
             downsample_ratio=downsample_ratio,
             bundle_path=bundle_path,
         )
-        # Prepare media and its requested report before replacing either artifact.
+        # 媒体和报告都准备成功后，再替换已有结果。
         destination.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix=".matting-", dir=destination.parent) as staging:
             pipeline_output = Path(staging) / ("transparent.mp4" if mode == "transparent" else "frames.mkv")
@@ -461,8 +461,7 @@ def main(argv: list[str] | None = None) -> None:
                 }, total_seconds, export_seconds=export_seconds, published_output_path=destination,
                     model_bundle_info=getattr(runner, "bundle_info", None))
             if mode == "transparent" and destination.exists():
-                # Preserve user notes in an existing sequence directory. Every
-                # newly added frame is exclusive and can be rolled back alone.
+                # 保留目录内已有备注；只发布并回滚本次新增的帧。
                 artifacts = [PublicationItem(path, destination / path.name, replace_existing=False)
                              for path in sorted(stats.output_path.glob("frame_*.png"))]
             else:

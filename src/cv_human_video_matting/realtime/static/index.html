@@ -277,7 +277,7 @@
         session.decoding = session.inFlight = false;
         const sourceName = session.source === "file" ? "本地视频" : "摄像头";
         status("正在预览", sourceName + " · " + (metadata.warmup ? "正在完成模型预热，首批画面的耗时可能较长。" : "连接正常。切换设置会停止当前预览，再点击开始即可应用。"), "running");
-        // Release the in-flight frame only after drawing; capture on a later animation frame.
+        // 结果绘制完成后才采集下一帧，保持同一时间只处理一帧。
         nextFrame(session);
       });
     } catch (_) { fail(session, "无法解码服务返回的画面，请重新开始预览。"); }
